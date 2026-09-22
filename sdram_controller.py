@@ -283,15 +283,15 @@ class SDRAMController(Elaboratable):
                 with m.Case(INIT_NOP1_1):
                     m.d.comb += [state_next.eq(INIT_REF1), command_next.eq(CMD_REF)]
                 with m.Case(INIT_REF1):
-                    m.d.comb += [state_next.eq(INIT_NOP2), state_cnt_next.eq(7)]
+                    m.d.comb += [state_next.eq(INIT_NOP2), state_cnt_next.eq(3)]
                 with m.Case(INIT_NOP2):
                     m.d.comb += [state_next.eq(INIT_REF2), command_next.eq(CMD_REF)]
                 with m.Case(INIT_REF2):
-                    m.d.comb += [state_next.eq(INIT_NOP3), state_cnt_next.eq(7)]
+                    m.d.comb += [state_next.eq(INIT_NOP3), state_cnt_next.eq(3)]
                 with m.Case(INIT_NOP3):
                     m.d.comb += [state_next.eq(INIT_LOAD), command_next.eq(CMD_MRS)]
                 with m.Case(INIT_LOAD):
-                    m.d.comb += [state_next.eq(INIT_NOP4), state_cnt_next.eq(1)]
+                    m.d.comb += state_next.eq(INIT_NOP4)
                 # INIT_NOP4: default -> IDLE
 
                 # ---- REFRESH ----
@@ -300,25 +300,25 @@ class SDRAMController(Elaboratable):
                 with m.Case(REF_NOP1):
                     m.d.comb += [state_next.eq(REF_REF), command_next.eq(CMD_REF)]
                 with m.Case(REF_REF):
-                    m.d.comb += [state_next.eq(REF_NOP2), state_cnt_next.eq(7)]
+                    m.d.comb += [state_next.eq(REF_NOP2), state_cnt_next.eq(3)]
                 # REF_NOP2: default -> IDLE
 
                 # ---- WRITE ----
                 with m.Case(WRIT_ACT):
-                    m.d.comb += [state_next.eq(WRIT_NOP1), state_cnt_next.eq(1)]
+                    m.d.comb += state_next.eq(WRIT_NOP1)
                 with m.Case(WRIT_NOP1):
                     m.d.comb += [state_next.eq(WRIT_CAS), command_next.eq(CMD_WRIT)]
                 with m.Case(WRIT_CAS):
-                    m.d.comb += [state_next.eq(WRIT_NOP2), state_cnt_next.eq(1)]
+                    m.d.comb += state_next.eq(WRIT_NOP2)
                 # WRIT_NOP2: default -> IDLE
 
                 # ---- READ ----
                 with m.Case(READ_ACT):
-                    m.d.comb += [state_next.eq(READ_NOP1), state_cnt_next.eq(1)]
+                    m.d.comb += state_next.eq(READ_NOP1)
                 with m.Case(READ_NOP1):
                     m.d.comb += [state_next.eq(READ_CAS), command_next.eq(CMD_READ)]
                 with m.Case(READ_CAS):
-                    m.d.comb += [state_next.eq(READ_NOP2), state_cnt_next.eq(1)]
+                    m.d.comb += state_next.eq(READ_NOP2)
                 with m.Case(READ_NOP2):
                     m.d.comb += state_next.eq(READ_READ)
                 # READ_READ: default -> IDLE
