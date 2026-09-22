@@ -7,60 +7,74 @@ Amaranth HDL port of stffrdhrn/sdram-controller (rtl/sdram_controller.v).
 
 Very simple host interface:
   * No burst support.
+
   * wr_addr / wr_data / wr_enable : write 16 bits. wr_data is latched when
-    wr_enable is high; the write reaches the SDRAM a few clocks later.
+                                    wr_enable is high; the write reaches
+                                    the SDRAM a few clocks later.
+
   * rd_addr / rd_enable           : read 16 bits. rd_addr is latched on the
-    clock edge where rd_enable is high; rd_data is valid a few clocks later,
-    when rd_ready pulses.
+                                    clock edge where rd_enable is high;
+                                    rd_data is valid a few clocks later,
+                                    when rd_ready pulses.
+
   * rst                           : (synchronous) starts the
                                     SDRAM initialisation sequence.
+
   * busy                          : high while a read/write is in flight;
                                     don't issue commands while it is high.
 
 The bidirectional SDRAM `data` bus is split into data_i / data_o / data_oe so
 it can be connected to whatever tristate primitive your platform uses.
 """
-
+from enum import IntEnum
 from amaranth import Cat, Const, Elaboratable, Module, Signal
 
-# State encoding (same values as the Verilog; state[4] means "read/write")
-IDLE = 0b00000
 
-INIT_NOP1   = 0b01000
-INIT_PRE1   = 0b01001
-INIT_NOP1_1 = 0b00101
-INIT_REF1   = 0b01010
-INIT_NOP2   = 0b01011
-INIT_REF2   = 0b01100
-INIT_NOP3   = 0b01101
-INIT_LOAD   = 0b01110
-INIT_NOP4   = 0b01111
+class State(IntEnum):
+    """
+    State encoding (same values as the Verilog; state[4] means "read/write").
+    """
+    IDLE = 0b00000
 
-REF_PRE  = 0b00001
-REF_NOP1 = 0b00010
-REF_REF  = 0b00011
-REF_NOP2 = 0b00100
+    INIT_NOP1 = 0b01000
+    INIT_PRE1 = 0b01001
+    INIT_NOP1_1 = 0b00101
+    INIT_REF1 = 0b01010
+    INIT_NOP2 = 0b01011
+    INIT_REF2 = 0b01100
+    INIT_NOP3 = 0b01101
+    INIT_LOAD = 0b01110
+    INIT_NOP4 = 0b01111
 
-READ_ACT  = 0b10000
-READ_NOP1 = 0b10001
-READ_CAS  = 0b10010
-READ_NOP2 = 0b10011
-READ_READ = 0b10100
+    REF_PRE = 0b00001
+    REF_NOP1 = 0b00010
+    REF_REF = 0b00011
+    REF_NOP2 = 0b00100
 
-WRIT_ACT  = 0b11000
-WRIT_NOP1 = 0b11001
-WRIT_CAS  = 0b11010
-WRIT_NOP2 = 0b11011
+    READ_ACT = 0b10000
+    READ_NOP1 = 0b10001
+    READ_CAS = 0b10010
+    READ_NOP2 = 0b10011
+    READ_READ = 0b10100
 
-# --- SDRAM commands: {CKE, CS#, RAS#, CAS#, WE#, BA1, BA0, A10} ---
-# The Verilog uses 'x' (don't care) in some bits; they are 0 here.
-CMD_PALL = 0b10010001
-CMD_REF  = 0b10001000
-CMD_NOP  = 0b10111000
-CMD_MRS  = 0b10000000  # 1000000x
-CMD_BACT = 0b10011000  # 10011xxx
-CMD_READ = 0b10101001  # 10101xx1
-CMD_WRIT = 0b10100001  # 10100xx1
+    WRIT_ACT = 0b11000
+    WRIT_NOP1 = 0b11001
+    WRIT_CAS = 0b11010
+    WRIT_NOP2 = 0b11011
+
+
+class Command(IntEnum):
+    """
+    SDRAM commands: CKE, CS#, RAS#, CAS#, WE#, BA1, BA0, A10. The Verilog
+    uses 'x' (don't care) in some bits; they are 0 here.
+    """
+    PALL = 0b10010001
+    REF = 0b10001000
+    NOP = 0b10111000
+    MRS = 0b10000000    # 1000000x
+    BACT = 0b10011000   # 10011xxx
+    READ = 0b10101001   # 10101xx1
+    WRIT = 0b10100001   # 10100xx1
 
 
 class SDRAMController(Elaboratable):
@@ -82,7 +96,9 @@ class SDRAMController(Elaboratable):
             )
 
         # clk / refresh = clk / sec  *  sec / refbatch  ->  cycles per refresh
-        self.cycles_between_refresh = (clk_frequency * 1_000 * refresh_time) // refresh_count
+        self.cycles_between_refresh = (
+            (clk_frequency * 1_000 * refresh_time) // refresh_count
+        )
 
         # Host interface
         self.wr_addr = Signal(self.haddr_width)
@@ -138,7 +154,8 @@ class SDRAMController(Elaboratable):
         command = Signal(8)
         state = Signal(5)
 
-        # TODO (from the original): output addr[6:4] when programming mode register
+        # TODO (from the original): output addr[6:4] when programming mode
+        #   register
         command_next = Signal(8)
         state_cnt_next = Signal(4)
         state_next = Signal(5)
@@ -158,7 +175,7 @@ class SDRAMController(Elaboratable):
         with m.Else():
             m.d.comb += self.bank_addr.eq(command[1:3])
 
-        with m.If(state[4] | (state == INIT_LOAD)):
+        with m.If(state[4] | (state == State.INIT_LOAD)):
             m.d.comb += self.addr.eq(addr_r)
         with m.Else():
             # A10 = command[0], all other address bits zero
@@ -167,7 +184,7 @@ class SDRAMController(Elaboratable):
         # Tristate data bus: drive only during the write CAS cycle
         m.d.comb += [
             self.data_o.eq(wr_data_r),
-            self.data_oe.eq(state == WRIT_CAS),
+            self.data_oe.eq(state == State.WRIT_CAS),
         ]
 
         # Data masks: 0 while reading/writing, 1 otherwise
@@ -179,8 +196,8 @@ class SDRAMController(Elaboratable):
         # Host interface (all registered on the clock edge)
         with m.If(self.rst):
             m.d.sync += [
-                state.eq(INIT_NOP1),
-                command.eq(CMD_NOP),
+                state.eq(State.INIT_NOP1),
+                command.eq(Command.NOP),
                 state_cnt.eq(0xf),
                 haddr_r.eq(0),
                 wr_data_r.eq(0),
@@ -201,7 +218,7 @@ class SDRAMController(Elaboratable):
             with m.If(self.wr_enable):
                 m.d.sync += wr_data_r.eq(self.wr_data)
 
-            with m.If(state == READ_READ):
+            with m.If(state == State.READ_READ):
                 m.d.sync += [
                     self.rd_data.eq(self.data_i),
                     self.rd_ready.eq(1),
@@ -219,7 +236,7 @@ class SDRAMController(Elaboratable):
         # Refresh counter
         with m.If(self.rst):
             m.d.sync += refresh_cnt.eq(0)
-        with m.Elif(state == REF_NOP2):
+        with m.Elif(state == State.REF_NOP2):
             m.d.sync += refresh_cnt.eq(0)
         with m.Else():
             m.d.sync += refresh_cnt.eq(refresh_cnt + 1)
@@ -230,101 +247,132 @@ class SDRAMController(Elaboratable):
         row_bits  = haddr_r[col_width:col_width + row_width]
         col_bits  = haddr_r[:col_width]
 
-        with m.If((state == READ_ACT) | (state == WRIT_ACT)):
+        with m.If((state == State.READ_ACT) | (state == State.WRIT_ACT)):
             m.d.comb += [
                 bank_addr_r.eq(bank_bits),
                 addr_r.eq(row_bits),
             ]
-        with m.Elif((state == READ_CAS) | (state == WRIT_CAS)):
+        with m.Elif((state == State.READ_CAS) | (state == State.WRIT_CAS)):
             # Send column address; bank is the bank to precharge.
             # addr = 0s, A10 = 1 (auto precharge), 0s, column address
             m.d.comb += [
                 bank_addr_r.eq(bank_bits),
                 addr_r.eq(Cat(col_bits, Const(0, 10 - col_width), Const(1, 1))),
             ]
-        with m.Elif(state == INIT_LOAD):
-            # Program the mode register during the load cycle
-            #   A9 (burst read / single write) = 1, CAS latency = 3, burst length = 1
+        with m.Elif(state == State.INIT_LOAD):
+            # Program the mode register during the load cycle.
+            # A9 (burst read / single write) = 1, CAS latency = 3,
+            # burst length = 1
             m.d.comb += addr_r.eq(0b1000110000)
 
         # Next-state logic
         m.d.comb += [
             state_cnt_next.eq(0),
-            command_next.eq(CMD_NOP),
+            command_next.eq(Command.NOP),
         ]
 
-        with m.If(state == IDLE):
+        with m.If(state == State.IDLE):
             # Monitor for refresh or hold
             with m.If(refresh_cnt >= self.cycles_between_refresh):
                 m.d.comb += [
-                    state_next.eq(REF_PRE),
-                    command_next.eq(CMD_PALL),
+                    state_next.eq(State.REF_PRE),
+                    command_next.eq(Command.PALL),
                 ]
             with m.Elif(self.rd_enable):
                 m.d.comb += [
-                    state_next.eq(READ_ACT),
-                    command_next.eq(CMD_BACT),
+                    state_next.eq(State.READ_ACT),
+                    command_next.eq(Command.BACT),
                 ]
             with m.Elif(self.wr_enable):
                 m.d.comb += [
-                    state_next.eq(WRIT_ACT),
-                    command_next.eq(CMD_BACT),
+                    state_next.eq(State.WRIT_ACT),
+                    command_next.eq(Command.BACT),
                 ]
             with m.Else():
-                m.d.comb += state_next.eq(IDLE)  # HOLD
+                m.d.comb += state_next.eq(State.IDLE)  # HOLD
 
         with m.Elif(state_cnt == 0):
             with m.Switch(state):
-                # ---- INIT ENGINE ----
-                with m.Case(INIT_NOP1):
-                    m.d.comb += [state_next.eq(INIT_PRE1), command_next.eq(CMD_PALL)]
-                with m.Case(INIT_PRE1):
-                    m.d.comb += state_next.eq(INIT_NOP1_1)
-                with m.Case(INIT_NOP1_1):
-                    m.d.comb += [state_next.eq(INIT_REF1), command_next.eq(CMD_REF)]
-                with m.Case(INIT_REF1):
-                    m.d.comb += [state_next.eq(INIT_NOP2), state_cnt_next.eq(3)]
-                with m.Case(INIT_NOP2):
-                    m.d.comb += [state_next.eq(INIT_REF2), command_next.eq(CMD_REF)]
-                with m.Case(INIT_REF2):
-                    m.d.comb += [state_next.eq(INIT_NOP3), state_cnt_next.eq(3)]
-                with m.Case(INIT_NOP3):
-                    m.d.comb += [state_next.eq(INIT_LOAD), command_next.eq(CMD_MRS)]
-                with m.Case(INIT_LOAD):
-                    m.d.comb += state_next.eq(INIT_NOP4)
+                # - init engine
+                with m.Case(State.INIT_NOP1):
+                    m.d.comb += [
+                        state_next.eq(State.INIT_PRE1),
+                        command_next.eq(Command.PALL),
+                    ]
+                with m.Case(State.INIT_PRE1):
+                    m.d.comb += state_next.eq(State.INIT_NOP1_1)
+                with m.Case(State.INIT_NOP1_1):
+                    m.d.comb += [
+                        state_next.eq(State.INIT_REF1),
+                        command_next.eq(Command.REF),
+                    ]
+                with m.Case(State.INIT_REF1):
+                    m.d.comb += [
+                        state_next.eq(State.INIT_NOP2),
+                        state_cnt_next.eq(3),
+                    ]
+                with m.Case(State.INIT_NOP2):
+                    m.d.comb += [
+                        state_next.eq(State.INIT_REF2),
+                        command_next.eq(Command.REF),
+                    ]
+                with m.Case(State.INIT_REF2):
+                    m.d.comb += [
+                        state_next.eq(State.INIT_NOP3),
+                        state_cnt_next.eq(3),
+                    ]
+                with m.Case(State.INIT_NOP3):
+                    m.d.comb += [
+                        state_next.eq(State.INIT_LOAD),
+                        command_next.eq(Command.MRS),
+                    ]
+                with m.Case(State.INIT_LOAD):
+                    m.d.comb += state_next.eq(State.INIT_NOP4)
                 # INIT_NOP4: default -> IDLE
 
-                # ---- REFRESH ----
-                with m.Case(REF_PRE):
-                    m.d.comb += state_next.eq(REF_NOP1)
-                with m.Case(REF_NOP1):
-                    m.d.comb += [state_next.eq(REF_REF), command_next.eq(CMD_REF)]
-                with m.Case(REF_REF):
-                    m.d.comb += [state_next.eq(REF_NOP2), state_cnt_next.eq(3)]
+                # - refresh
+                with m.Case(State.REF_PRE):
+                    m.d.comb += state_next.eq(State.REF_NOP1)
+                with m.Case(State.REF_NOP1):
+                    m.d.comb += [
+                        state_next.eq(State.REF_REF),
+                        command_next.eq(Command.REF),
+                    ]
+                with m.Case(State.REF_REF):
+                    m.d.comb += [
+                        state_next.eq(State.REF_NOP2),
+                        state_cnt_next.eq(3),
+                    ]
                 # REF_NOP2: default -> IDLE
 
-                # ---- WRITE ----
-                with m.Case(WRIT_ACT):
-                    m.d.comb += state_next.eq(WRIT_NOP1)
-                with m.Case(WRIT_NOP1):
-                    m.d.comb += [state_next.eq(WRIT_CAS), command_next.eq(CMD_WRIT)]
-                with m.Case(WRIT_CAS):
-                    m.d.comb += state_next.eq(WRIT_NOP2)
+                # - write
+                with m.Case(State.WRIT_ACT):
+                    m.d.comb += state_next.eq(State.WRIT_NOP1)
+                with m.Case(State.WRIT_NOP1):
+                    m.d.comb += [
+                        state_next.eq(State.WRIT_CAS),
+                        command_next.eq(Command.WRIT),
+                    ]
+                with m.Case(State.WRIT_CAS):
+                    m.d.comb += state_next.eq(State.WRIT_NOP2)
                 # WRIT_NOP2: default -> IDLE
 
-                # ---- READ ----
-                with m.Case(READ_ACT):
-                    m.d.comb += state_next.eq(READ_NOP1)
-                with m.Case(READ_NOP1):
-                    m.d.comb += [state_next.eq(READ_CAS), command_next.eq(CMD_READ)]
-                with m.Case(READ_CAS):
-                    m.d.comb += state_next.eq(READ_NOP2)
-                with m.Case(READ_NOP2):
-                    m.d.comb += state_next.eq(READ_READ)
+                # - read
+                with m.Case(State.READ_ACT):
+                    m.d.comb += state_next.eq(State.READ_NOP1)
+                with m.Case(State.READ_NOP1):
+                    m.d.comb += [
+                        state_next.eq(State.READ_CAS),
+                        command_next.eq(Command.READ),
+                    ]
+                with m.Case(State.READ_CAS):
+                    m.d.comb += state_next.eq(State.READ_NOP2)
+                with m.Case(State.READ_NOP2):
+                    m.d.comb += state_next.eq(State.READ_READ)
                 # READ_READ: default -> IDLE
 
                 with m.Default():
-                    m.d.comb += state_next.eq(IDLE)
+                    m.d.comb += state_next.eq(State.IDLE)
 
         with m.Else():
             # Counter not reached - HOLD
@@ -334,7 +382,3 @@ class SDRAMController(Elaboratable):
             ]
 
         return m
-
-
-if __name__ == "__main__":
-    pass
