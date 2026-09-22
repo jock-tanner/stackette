@@ -1,0 +1,3 @@
+amaranth[builtin-yosys]
+amaranth-boards
+pytest-amaranth-sim
