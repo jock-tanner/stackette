@@ -33,9 +33,7 @@ class SDRAMTest(Elaboratable):
         read_wait_led = platform.request('led', 4)
 
         m.submodules.pll_gen = pll_gen = DE0NanoSDRAMPLL()
-        m.submodules.sdram_controller = sdram_controller = SDRAMController(
-            **self.sdram_kwargs
-        )
+        m.submodules.sdram_controller = sdram_controller = SDRAMController()
         addr_bits = max(self.word_count - 1, 1).bit_length()
         addr = Signal(addr_bits)
         rst_cnt = Signal(range(self.reset_cycles + 1), init=self.reset_cycles)

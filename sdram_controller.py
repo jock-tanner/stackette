@@ -29,6 +29,16 @@ it can be connected to whatever tristate primitive your platform uses.
 from enum import IntEnum
 from amaranth import Cat, Const, Elaboratable, Module, Signal
 
+CLOCK_FREQ = 50         # MHz, frequency of the controller's clock
+REFRESH_TIME = 32       # ms (how often we need to refresh)
+REFRESH_COUNT = 8192    # refresh cycles required per refresh_time
+
+ROW_WIDTH = 13
+COL_WIDTH = 9
+BANK_WIDTH = 2
+SDRAM_ADDR_WIDTH = max(ROW_WIDTH, COL_WIDTH)
+HOST_ADDR_WIDTH = ROW_WIDTH + COL_WIDTH + BANK_WIDTH
+
 
 class State(IntEnum):
     """
@@ -78,33 +88,16 @@ class Command(IntEnum):
 
 
 class SDRAMController(Elaboratable):
-    def __init__(
-        self, *, row_width=13, col_width=9, bank_width=2,
-        clk_frequency=50,    # MHz, frequency of the controller's clock
-        refresh_time=32,     # ms (how often we need to refresh)
-        refresh_count=8192,  # refresh cycles required per refresh_time
-    ):
-        self.row_width = row_width
-        self.col_width = col_width
-        self.bank_width = bank_width
-        self.sdraddr_width = max(row_width, col_width)
-        self.haddr_width = bank_width + row_width + col_width
-
-        if self.sdraddr_width < 11:
-            raise ValueError(
-                'SDRAM address bus must be at least 11 bits wide (A10 is used)'
-            )
-
-        # clk / refresh = clk / sec  *  sec / refbatch  ->  cycles per refresh
+    def __init__(self):
         self.cycles_between_refresh = (
-            (clk_frequency * 1_000 * refresh_time) // refresh_count
+            (CLOCK_FREQ * 1_000 * REFRESH_TIME) // REFRESH_COUNT
         )
 
         # Host interface
-        self.wr_addr = Signal(self.haddr_width)
+        self.wr_addr = Signal(HOST_ADDR_WIDTH)
         self.wr_data = Signal(16)
         self.wr_enable = Signal()
-        self.rd_addr = Signal(self.haddr_width)
+        self.rd_addr = Signal(HOST_ADDR_WIDTH)
         self.rd_data = Signal(16)
         self.rd_ready = Signal()
         self.rd_enable = Signal()
@@ -112,8 +105,8 @@ class SDRAMController(Elaboratable):
         self.rst = Signal()
 
         # SDRAM side
-        self.addr = Signal(self.sdraddr_width)
-        self.bank_addr = Signal(bank_width)
+        self.addr = Signal(SDRAM_ADDR_WIDTH)
+        self.bank_addr = Signal(BANK_WIDTH)
         self.data_i = Signal(16)                # from the SDRAM DQ pins
         self.data_o = Signal(16)                # to the SDRAM DQ pins
         self.data_oe = Signal()                 # drive DQ pins when high
@@ -140,12 +133,12 @@ class SDRAMController(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        row_width = self.row_width
-        col_width = self.col_width
-        bank_width = self.bank_width
+        row_width = ROW_WIDTH
+        col_width = COL_WIDTH
+        bank_width = BANK_WIDTH
 
         # I/O registers
-        haddr_r = Signal(self.haddr_width)
+        haddr_r = Signal(HOST_ADDR_WIDTH)
         wr_data_r = Signal(16)
 
         # Internal wiring
@@ -161,7 +154,7 @@ class SDRAMController(Elaboratable):
         state_next = Signal(5)
 
         bank_addr_r = Signal(bank_width)
-        addr_r = Signal(self.sdraddr_width)
+        addr_r = Signal(SDRAM_ADDR_WIDTH)
 
         # Outputs to the SDRAM
         # assign {clock_enable, cs_n, ras_n, cas_n, we_n} = command[7:3];
