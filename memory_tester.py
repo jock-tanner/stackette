@@ -33,7 +33,19 @@ class SDRAMTest(Elaboratable):
         read_wait_led = platform.request('led', 4)
 
         m.submodules.pll_gen = pll_gen = DE0NanoSDRAMPLL()
-        m.submodules.sdram_controller = sdram_controller = SDRAMController()
+
+        # The controller has no reset port anymore: it is reset by the reset
+        # of the domain it runs in. Run it in its own domain ("sdram_ctl",
+        # same clock as "sync") so the reset can be held for reset_cycles
+        # after the PLL locks, as the old RESET state did via the rst port.
+        sdram_controller = SDRAMController()
+        m.submodules.sdram_controller = DomainRenamer({'sync': 'sdram_ctl'})(
+            sdram_controller
+        )
+        host = sdram_controller.host
+        resp = sdram_controller.resp
+        sdram = sdram_controller.sdram
+
         addr_bits = max(self.word_count - 1, 1).bit_length()
         addr = Signal(addr_bits)
         rst_cnt = Signal(range(self.reset_cycles + 1), init=self.reset_cycles)
@@ -47,97 +59,57 @@ class SDRAMTest(Elaboratable):
 
         m.domains.sync = ClockDomain('sync')
         m.domains.sdram = ClockDomain('sdram')
+        m.domains.sdram_ctl = ClockDomain('sdram_ctl')
+
         m.d.comb += [
-            # create clock domains (if necessary)
-            ClockSignal('sync').eq(pll_gen.clk_sys),
-            ResetSignal('sync').eq(~pll_gen.locked),
-            ClockSignal('sdram').eq(pll_gen.clk_sdram),
-            ResetSignal('sdram').eq(~pll_gen.locked),
-
-            # wire up sdram
-            # - clock
-            sdram_pins.clk.o.eq(pll_gen.clk_sdram),
-
-            # - address
-            sdram_pins.a.o.eq(sdram_controller.addr),
-            sdram_pins.ba.o.eq(sdram_controller.bank_addr),
-
-            # - data
-            sdram_pins.dq.o.eq(sdram_controller.data_o),
-            sdram_pins.dq.oe.eq(sdram_controller.data_oe),
-            sdram_controller.data_i.eq(sdram_pins.dq.i),
-
-            # - control
-            sdram_pins.ras.o.eq(~sdram_controller.ras_n),
-            sdram_pins.cas.o.eq(~sdram_controller.cas_n),
-            sdram_pins.we.o.eq(~sdram_controller.we_n),
-            sdram_pins.cs.o.eq(~sdram_controller.cs_n),
-            sdram_pins.clk_en.o.eq(sdram_controller.clock_enable),
-            sdram_pins.dqm.o.eq(Cat(
-                sdram_controller.data_mask_low,
-                sdram_controller.data_mask_high,
-            )),
-
-            # LEDs
-            mismatch_led.o.eq(self.led),
-            done_led.o.eq(self.done),
-            write_wait_led.o.eq(self.write_wait),
-            read_wait_led.o.eq(self.read_wait),
+            host.byte_hi.eq(1),     # high byte enabled
+            host.byte_lo.eq(1),     # low byte enabled
         ]
 
         with m.FSM(init='RESET') as fsm:
             with m.State('RESET'):
-                # Hold sdram.rst_n low for reset_cycles, then let the
-                # controller run its own internal init sequence.
-                m.d.comb += sdram_controller.rst.eq(1)
+                # Keep the controller in reset (see below) for reset_cycles,
+                # then let it run its own internal init sequence.
                 with m.If(rst_cnt == 0):
                     m.d.sync += addr.eq(0)
-                    m.next = 'WRITE_ISSUE'
+                    m.next = 'WRITE'
                 with m.Else():
                     m.d.sync += rst_cnt.eq(rst_cnt - 1)
 
-            with m.State('WRITE_ISSUE'):
-                # Hold wr_enable asserted every cycle until the controller
-                # acknowledges with busy - a one-cycle pulse can land on the
-                # same cycle a refresh becomes due, in which case the
-                # controller services the refresh instead and silently
-                # drops the request.
+            with m.State('WRITE'):
+                # Hold the request until the controller accepts it
+                # (valid & ready). ready stays low during the controller's
+                # init sequence and whenever a refresh is due, so nothing
+                # is dropped. Writes have no response, so move straight on
+                # to the next address once accepted.
                 m.d.comb += [
-                    sdram_controller.rst.eq(0),
-                    sdram_controller.wr_addr.eq(addr),
-                    sdram_controller.wr_data.eq(self.pattern),
-                    sdram_controller.wr_enable.eq(1),
+                    host.valid.eq(1),
+                    host.we.eq(1),
+                    host.addr.eq(addr),
+                    host.wdata.eq(self.pattern),
+                    self.write_wait.eq(~host.ready),
                 ]
-                with m.If(sdram_controller.busy):
-                    m.next = 'WRITE_WAIT'
-
-            with m.State('WRITE_WAIT'):
-                m.d.comb += sdram_controller.rst.eq(0)
-                m.d.comb += self.write_wait.eq(1)
-                with m.If(~sdram_controller.busy):
+                with m.If(host.ready):
                     with m.If(addr == self.word_count - 1):
                         m.d.sync += addr.eq(0)
                         m.next = 'READ_ISSUE'
                     with m.Else():
                         m.d.sync += addr.eq(addr + 1)
-                        m.next = 'WRITE_ISSUE'
 
             with m.State('READ_ISSUE'):
-                # Same reasoning as WRITE_ISSUE: hold rd_enable until busy
-                # confirms the read was accepted.
+                # Same handshake as WRITE: hold the request until accepted.
                 m.d.comb += [
-                    sdram_controller.rst.eq(0),
-                    sdram_controller.rd_addr.eq(addr),
-                    sdram_controller.rd_enable.eq(1),
+                    host.valid.eq(1),
+                    host.we.eq(0),
+                    host.addr.eq(addr),
                 ]
-                with m.If(sdram_controller.busy):
+                with m.If(host.ready):
                     m.next = 'READ_WAIT'
 
             with m.State('READ_WAIT'):
-                m.d.comb += sdram_controller.rst.eq(0)
-                m.d.comb += self.read_wait.eq(~sdram_controller.rd_ready)
-                with m.If(sdram_controller.rd_ready):
-                    with m.If(sdram_controller.rd_data != self.pattern):
+                m.d.comb += self.read_wait.eq(~resp.valid)
+                with m.If(resp.valid):
+                    with m.If(resp.data != self.pattern):
                         m.d.sync += mismatch.eq(1)
                     with m.If(addr == self.word_count - 1):
                         m.next = 'DONE'
@@ -146,10 +118,46 @@ class SDRAMTest(Elaboratable):
                         m.next = 'READ_ISSUE'
 
             with m.State('DONE'):
-                m.d.comb += [
-                    sdram_controller.rst.eq(0),
-                    self.done.eq(1),
-                ]
+                m.d.comb += self.done.eq(1)
+
+        m.d.comb += [
+            # create clock domains (if necessary)
+            ClockSignal('sync').eq(pll_gen.clk_sys),
+            ResetSignal('sync').eq(~pll_gen.locked),
+            ClockSignal('sdram').eq(pll_gen.clk_sdram),
+            ResetSignal('sdram').eq(~pll_gen.locked),
+            ClockSignal('sdram_ctl').eq(pll_gen.clk_sys),
+            ResetSignal('sdram_ctl').eq(
+                ~pll_gen.locked | fsm.ongoing('RESET')
+            ),
+
+            # wire up sdram
+            # - clock
+            sdram_pins.clk.o.eq(pll_gen.clk_sdram),
+
+            # - address
+            sdram_pins.a.o.eq(sdram.a),
+            sdram_pins.ba.o.eq(sdram.ba),
+
+            # - data
+            sdram_pins.dq.o.eq(sdram.dq_o),
+            sdram_pins.dq.oe.eq(sdram.dq_oe),
+            sdram.dq_i.eq(sdram_pins.dq.i),
+
+            # - control
+            sdram_pins.ras.o.eq(~sdram.ras_n),
+            sdram_pins.cas.o.eq(~sdram.cas_n),
+            sdram_pins.we.o.eq(~sdram.we_n),
+            sdram_pins.cs.o.eq(~sdram.cs_n),
+            sdram_pins.clk_en.o.eq(sdram.cke),
+            sdram_pins.dqm.o.eq(sdram.dqm),
+
+            # LEDs
+            mismatch_led.o.eq(self.led),
+            done_led.o.eq(self.done),
+            write_wait_led.o.eq(self.write_wait),
+            read_wait_led.o.eq(self.read_wait),
+        ]
 
         return m
 

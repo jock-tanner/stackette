@@ -1,33 +1,38 @@
 """
 Simple controller for the ISSI IS42S16160G-7 SDRAM found on the DE0-Nano.
 16M x 16-bit data bus (32 MiB), CAS latency 3, 50 MHz controller clock by
-default (set clk_frequency to match the clock you actually drive it with).
+default (set CLOCK_FREQ to match the clock you actually drive it with).
 
-Amaranth HDL port of stffrdhrn/sdram-controller (rtl/sdram_controller.v).
+Amaranth HDL port of stffrdhrn/sdram-controller (rtl/sdram_controller.v),
+with the interfaces described using amaranth.lib.wiring (Amaranth >= 0.5).
 
-Very simple host interface:
+Host interface (`host`, a HostRequest signature) is a valid/ready handshake:
   * No burst support.
 
-  * wr_addr / wr_data / wr_enable : write 16 bits. wr_data is latched when
-                                    wr_enable is high; the write reaches
-                                    the SDRAM a few clocks later.
+  * The initiator sets valid together with we / addr / wdata and holds them
+    until ready is high. The request is accepted on the clock edge where
+    valid & ready. ready is only high in IDLE when no refresh is due, so a
+    request can never be silently dropped: just keep valid up.
 
-  * rd_addr / rd_enable           : read 16 bits. rd_addr is latched on the
-                                    clock edge where rd_enable is high;
-                                    rd_data is valid a few clocks later,
-                                    when rd_ready pulses.
+  * we = 1 writes wdata (16 bits) to addr; the write reaches the SDRAM a few
+    clocks later. No response is generated for writes.
 
-  * rst                           : (synchronous) starts the
-                                    SDRAM initialisation sequence.
+  * we = 0 reads 16 bits from addr; the result appears on `resp`
+    (a HostResponse signature) a few clocks later, when resp.valid pulses.
 
-  * busy                          : high while a read/write is in flight;
-                                    don't issue commands while it is high.
+Reset:
+  * The controller uses the reset of the domain it runs in (e.g. "sync", or
+    whatever you rename it to with DomainRenamer). Reset (or power-up)
+    starts the SDRAM initialization sequence; there is no separate rst port.
+    The host sees ready = 0 until initialization has finished.
 
-The bidirectional SDRAM `data` bus is split into data_i / data_o / data_oe so
-it can be connected to whatever tristate primitive your platform uses.
+SDRAM interface (`sdram`, an SDRAMPins signature):
+  * The bidirectional DQ bus is split into dq_i / dq_o / dq_oe so it can be
+    connected to whatever tristate primitive your platform uses.
 """
 from enum import IntEnum
-from amaranth import Cat, Const, Elaboratable, Module, Signal
+from amaranth import Cat, Const, Module, Mux, Signal
+from amaranth.lib.wiring import Component, In, Out, Signature
 
 CLOCK_FREQ = 50         # MHz, frequency of the controller's clock
 REFRESH_TIME = 32       # ms (how often we need to refresh)
@@ -87,48 +92,72 @@ class Command(IntEnum):
     WRIT = 0b10100001   # 10100xx1
 
 
-class SDRAMController(Elaboratable):
+class HostRequest(Signature):
+    """
+    Request channel, described from the initiator's point of view
+    (valid/we/addr/wdata are outputs, ready is an input).
+    """
     def __init__(self):
+        super().__init__({
+            'valid': Out(1),
+            'ready': In(1),
+            'we': Out(1),
+            'byte_hi': Out(1),
+            'byte_lo': Out(1),
+            'addr': Out(HOST_ADDR_WIDTH),
+            'wdata': Out(16),
+        })
+
+
+class HostResponse(Signature):
+    """
+    Read response channel, described from the controller's point of view.
+    There is no backpressure: the initiator must always accept it.
+    """
+    def __init__(self):
+        super().__init__({
+            'valid': Out(1),
+            'data': Out(16),
+        })
+
+
+class SDRAMPins(Signature):
+    """
+    SDRAM pins, described from the controller's point of view. The clock is
+    not included: it is driven separately (phase shifted) by the board.
+    """
+    def __init__(self):
+        super().__init__({
+            'a': Out(SDRAM_ADDR_WIDTH),
+            'ba': Out(BANK_WIDTH),
+            'cke': Out(1),
+            'cs_n': Out(1),
+            'ras_n': Out(1),
+            'cas_n': Out(1),
+            'we_n': Out(1),
+            'dqm': Out(2),        # {UDQM, LDQM}
+            'dq_i': In(16),        # from the SDRAM DQ pins
+            'dq_o': Out(16),       # to the SDRAM DQ pins
+            'dq_oe': Out(1),        # drive DQ pins when high
+        })
+
+
+class SDRAMController(Component):
+    host: In(HostRequest())
+    resp: Out(HostResponse())
+    sdram: Out(SDRAMPins())
+
+    def __init__(self):
+        super().__init__()
         self.cycles_between_refresh = (
             (CLOCK_FREQ * 1_000 * REFRESH_TIME) // REFRESH_COUNT
         )
 
-        # Host interface
-        self.wr_addr = Signal(HOST_ADDR_WIDTH)
-        self.wr_data = Signal(16)
-        self.wr_enable = Signal()
-        self.rd_addr = Signal(HOST_ADDR_WIDTH)
-        self.rd_data = Signal(16)
-        self.rd_ready = Signal()
-        self.rd_enable = Signal()
-        self.busy = Signal()
-        self.rst = Signal()
-
-        # SDRAM side
-        self.addr = Signal(SDRAM_ADDR_WIDTH)
-        self.bank_addr = Signal(BANK_WIDTH)
-        self.data_i = Signal(16)                # from the SDRAM DQ pins
-        self.data_o = Signal(16)                # to the SDRAM DQ pins
-        self.data_oe = Signal()                 # drive DQ pins when high
-        self.clock_enable = Signal()
-        self.cs_n = Signal()
-        self.ras_n = Signal()
-        self.cas_n = Signal()
-        self.we_n = Signal()
-        self.data_mask_low = Signal()
-        self.data_mask_high = Signal()
-
     @property
     def ports(self):
-        return [
-            self.wr_addr, self.wr_data, self.wr_enable,
-            self.rd_addr, self.rd_data, self.rd_ready, self.rd_enable,
-            self.busy, self.rst,
-            self.addr, self.bank_addr,
-            self.data_i, self.data_o, self.data_oe,
-            self.clock_enable, self.cs_n, self.ras_n, self.cas_n, self.we_n,
-            self.data_mask_low, self.data_mask_high,
-        ]
+        """All interface signals, e.g. for amaranth.back.verilog.convert().
+        Add ClockSignal()/ResetSignal() of the domain yourself."""
+        return [value for _, _, value in self.signature.flatten(self)]
 
     def elaborate(self, platform):
         m = Module()
@@ -137,15 +166,18 @@ class SDRAMController(Elaboratable):
         col_width = COL_WIDTH
         bank_width = BANK_WIDTH
 
-        # I/O registers
+        host = self.host
+        resp = self.resp
+        sdram = self.sdram
+
+        # Registers. Their reset values (applied by the domain reset) put the
+        # controller at the start of the initialization sequence.
         haddr_r = Signal(HOST_ADDR_WIDTH)
         wr_data_r = Signal(16)
-
-        # Internal wiring
-        state_cnt = Signal(4)
+        state_cnt = Signal(4, init=0xf)
         refresh_cnt = Signal(10)
-        command = Signal(8)
-        state = Signal(5)
+        command = Signal(8, init=Command.NOP)
+        state = Signal(5, init=State.INIT_NOP1)
 
         # TODO (from the original): output addr[6:4] when programming mode
         #   register
@@ -156,80 +188,74 @@ class SDRAMController(Elaboratable):
         bank_addr_r = Signal(bank_width)
         addr_r = Signal(SDRAM_ADDR_WIDTH)
 
+        # Request handshake: only take requests in IDLE, and not when a
+        # refresh is about to start (the refresh has priority in IDLE).
+        refresh_due = Signal()
+        accept = Signal()
+        m.d.comb += [
+            refresh_due.eq(refresh_cnt >= self.cycles_between_refresh),
+            host.ready.eq((state == State.IDLE) & ~refresh_due),
+            accept.eq(host.valid & host.ready),
+        ]
+
         # Outputs to the SDRAM
         # assign {clock_enable, cs_n, ras_n, cas_n, we_n} = command[7:3];
         m.d.comb += Cat(
-            self.we_n, self.cas_n, self.ras_n, self.cs_n, self.clock_enable
+            sdram.we_n, sdram.cas_n, sdram.ras_n, sdram.cs_n, sdram.cke
         ).eq(command[3:8])
 
         # state[4] is set if the mode is read/write
         with m.If(state[4]):
-            m.d.comb += self.bank_addr.eq(bank_addr_r)
+            m.d.comb += sdram.ba.eq(bank_addr_r)
         with m.Else():
-            m.d.comb += self.bank_addr.eq(command[1:3])
+            m.d.comb += sdram.ba.eq(command[1:3])
 
         with m.If(state[4] | (state == State.INIT_LOAD)):
-            m.d.comb += self.addr.eq(addr_r)
+            m.d.comb += sdram.a.eq(addr_r)
         with m.Else():
             # A10 = command[0], all other address bits zero
-            m.d.comb += self.addr.eq(Cat(Const(0, 10), command[0]))
+            m.d.comb += sdram.a.eq(Cat(Const(0, 10), command[0]))
 
         # Tristate data bus: drive only during the write CAS cycle
         m.d.comb += [
-            self.data_o.eq(wr_data_r),
-            self.data_oe.eq(state == State.WRIT_CAS),
+            sdram.dq_o.eq(wr_data_r),
+            sdram.dq_oe.eq(state == State.WRIT_CAS),
         ]
 
         # Data masks: 0 while reading/writing, 1 otherwise
-        m.d.comb += [
-            self.data_mask_low.eq(~state[4]),
-            self.data_mask_high.eq(~state[4]),
+        m.d.comb += sdram.dqm.eq(
+            Mux(state[4], Cat([~host.byte_lo, ~host.byte_hi]), 0b11)
+        )
+
+        # Registered state, command and counters
+        m.d.sync += [
+            state.eq(state_next),
+            command.eq(command_next),
         ]
 
-        # Host interface (all registered on the clock edge)
-        with m.If(self.rst):
+        with m.If(state_cnt == 0):
+            m.d.sync += state_cnt.eq(state_cnt_next)
+        with m.Else():
+            m.d.sync += state_cnt.eq(state_cnt - 1)
+
+        # Latch the request when it is accepted
+        with m.If(accept):
             m.d.sync += [
-                state.eq(State.INIT_NOP1),
-                command.eq(Command.NOP),
-                state_cnt.eq(0xf),
-                haddr_r.eq(0),
-                wr_data_r.eq(0),
-                self.rd_data.eq(0),
-                self.busy.eq(0),
+                haddr_r.eq(host.addr),
+                wr_data_r.eq(host.wdata),
+            ]
+
+        # Read response
+        with m.If(state == State.READ_READ):
+            m.d.sync += [
+                resp.data.eq(sdram.dq_i),
+                resp.valid.eq(1),
             ]
         with m.Else():
-            m.d.sync += [
-                state.eq(state_next),
-                command.eq(command_next),
-            ]
-
-            with m.If(state_cnt == 0):
-                m.d.sync += state_cnt.eq(state_cnt_next)
-            with m.Else():
-                m.d.sync += state_cnt.eq(state_cnt - 1)
-
-            with m.If(self.wr_enable):
-                m.d.sync += wr_data_r.eq(self.wr_data)
-
-            with m.If(state == State.READ_READ):
-                m.d.sync += [
-                    self.rd_data.eq(self.data_i),
-                    self.rd_ready.eq(1),
-                ]
-            with m.Else():
-                m.d.sync += self.rd_ready.eq(0)
-
-            m.d.sync += self.busy.eq(state[4])
-
-            with m.If(self.rd_enable):
-                m.d.sync += haddr_r.eq(self.rd_addr)
-            with m.Elif(self.wr_enable):
-                m.d.sync += haddr_r.eq(self.wr_addr)
+            m.d.sync += resp.valid.eq(0)
 
         # Refresh counter
-        with m.If(self.rst):
-            m.d.sync += refresh_cnt.eq(0)
-        with m.Elif(state == State.REF_NOP2):
+        with m.If(state == State.REF_NOP2):
             m.d.sync += refresh_cnt.eq(0)
         with m.Else():
             m.d.sync += refresh_cnt.eq(refresh_cnt + 1)
@@ -266,17 +292,17 @@ class SDRAMController(Elaboratable):
 
         with m.If(state == State.IDLE):
             # Monitor for refresh or hold
-            with m.If(refresh_cnt >= self.cycles_between_refresh):
+            with m.If(refresh_due):
                 m.d.comb += [
                     state_next.eq(State.REF_PRE),
                     command_next.eq(Command.PALL),
                 ]
-            with m.Elif(self.rd_enable):
+            with m.Elif(accept & ~host.we):
                 m.d.comb += [
                     state_next.eq(State.READ_ACT),
                     command_next.eq(Command.BACT),
                 ]
-            with m.Elif(self.wr_enable):
+            with m.Elif(accept & host.we):
                 m.d.comb += [
                     state_next.eq(State.WRIT_ACT),
                     command_next.eq(Command.BACT),
