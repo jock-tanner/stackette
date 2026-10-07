@@ -9,12 +9,10 @@ class SDRAMTest(Elaboratable):
     """
     def __init__(
         self, *, word_count=16777216, pattern=0xA5A5, reset_cycles=1024,
-        **sdram_kwargs
     ):
         self.word_count = word_count
         self.pattern = pattern
         self.reset_cycles = reset_cycles
-        self.sdram_kwargs = sdram_kwargs
 
         # Outputs
         self.led = Signal()  # sticky: goes high on first mismatch, stays high
