@@ -6,7 +6,8 @@ default (set CLOCK_FREQ to match the clock you actually drive it with).
 Amaranth HDL port of stffrdhrn/sdram-controller (rtl/sdram_controller.v),
 with the interfaces described using amaranth.lib.wiring (Amaranth >= 0.5).
 
-Host interface (`host`, a HostRequest signature) is a valid/ready handshake:
+Host interface (`bus`, a MemoryPort, see memory_port.py) is a valid/ready
+handshake on `bus.req`:
   * No burst support.
 
   * The initiator sets valid together with we / addr / wdata and holds them
@@ -17,8 +18,8 @@ Host interface (`host`, a HostRequest signature) is a valid/ready handshake:
   * we = 1 writes wdata (16 bits) to addr; the write reaches the SDRAM a few
     clocks later. No response is generated for writes.
 
-  * we = 0 reads 16 bits from addr; the result appears on `resp`
-    (a HostResponse signature) a few clocks later, when resp.valid pulses.
+  * we = 0 reads 16 bits from addr; the result appears on `bus.resp`
+    a few clocks later, when resp.valid pulses.
 
 Reset:
   * The controller uses the reset of the domain it runs in (e.g. "sync", or
@@ -33,6 +34,8 @@ SDRAM interface (`sdram`, an SDRAMPins signature):
 from enum import IntEnum
 from amaranth import Cat, Const, Module, Mux, Signal
 from amaranth.lib.wiring import Component, In, Out, Signature
+
+from memory_port import MemoryPort
 
 CLOCK_FREQ = 50         # MHz, frequency of the controller's clock
 REFRESH_TIME = 32       # ms (how often we need to refresh)
@@ -92,35 +95,6 @@ class Command(IntEnum):
     WRIT = 0b10100001   # 10100xx1
 
 
-class HostRequest(Signature):
-    """
-    Request channel, described from the initiator's point of view
-    (valid/we/addr/wdata are outputs, ready is an input).
-    """
-    def __init__(self):
-        super().__init__({
-            'valid': Out(1),
-            'ready': In(1),
-            'we': Out(1),
-            'byte_hi': Out(1),
-            'byte_lo': Out(1),
-            'addr': Out(HOST_ADDR_WIDTH),
-            'wdata': Out(16),
-        })
-
-
-class HostResponse(Signature):
-    """
-    Read response channel, described from the controller's point of view.
-    There is no backpressure: the initiator must always accept it.
-    """
-    def __init__(self):
-        super().__init__({
-            'valid': Out(1),
-            'data': Out(16),
-        })
-
-
 class SDRAMPins(Signature):
     """
     SDRAM pins, described from the controller's point of view. The clock is
@@ -143,8 +117,7 @@ class SDRAMPins(Signature):
 
 
 class SDRAMController(Component):
-    host: In(HostRequest())
-    resp: Out(HostResponse())
+    bus: In(MemoryPort(HOST_ADDR_WIDTH))
     sdram: Out(SDRAMPins())
 
     def __init__(self):
@@ -166,8 +139,8 @@ class SDRAMController(Component):
         col_width = COL_WIDTH
         bank_width = BANK_WIDTH
 
-        host = self.host
-        resp = self.resp
+        host = self.bus.req
+        resp = self.bus.resp
         sdram = self.sdram
 
         # Registers. Their reset values (applied by the domain reset) put the
