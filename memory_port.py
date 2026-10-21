@@ -18,13 +18,28 @@ Protocol:
   * addr is a word address; its width is a parameter, so a width mismatch
     between two components is caught by wiring.connect() and has to be
     resolved by an explicit adapter (e.g. an MMU or cache).
+  * The initiator sets valid together with we / byte_hi / byte_lo / addr /
+    wdata and holds them until ready is high. All fields are latched on
+    accept, so they may change afterward.
+  * byte_hi / byte_lo are byte enables for bits 15:8 / 7:0. They drive the
+    SDRAM's UDQM / LDQM (inverted). A write stores only enabled bytes; on a
+    read the disabled lane of resp.data is undefined.
 """
-from amaranth.lib import wiring
-from amaranth.lib.wiring import In, Out
+from amaranth.lib.wiring import In, Out, Signature
 
 
-class MemoryRequest(wiring.Signature):
-    """Request channel, from the initiator's point of view."""
+class MemoryRequest(Signature):
+    """
+    Request channel, from the initiator's point of view.
+
+      valid, ready  handshake, see the module docstring
+      we            1 = write, 0 = read
+      byte_hi       enable bits 15:8 of the word
+      byte_lo       enable bits 7:0 of the word
+      addr          word address
+      wdata         write data (ignored for reads)
+    """
+
     def __init__(self, addr_width, data_width=16):
         super().__init__({
             'valid': Out(1),
@@ -37,7 +52,7 @@ class MemoryRequest(wiring.Signature):
         })
 
 
-class MemoryResponse(wiring.Signature):
+class MemoryResponse(Signature):
     """Read response channel, from the target's point of view."""
     def __init__(self, data_width=16):
         super().__init__({
@@ -46,7 +61,7 @@ class MemoryResponse(wiring.Signature):
         })
 
 
-class MemoryPort(wiring.Signature):
+class MemoryPort(Signature):
     """A request channel plus a response channel, initiator's view."""
     def __init__(self, addr_width, data_width=16):
         super().__init__({

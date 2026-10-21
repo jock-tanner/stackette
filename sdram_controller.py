@@ -145,7 +145,9 @@ class SDRAMController(Component):
 
         # Registers. Their reset values (applied by the domain reset) put the
         # controller at the start of the initialization sequence.
-        haddr_r = Signal(HOST_ADDR_WIDTH)
+        host_addr_r = Signal(HOST_ADDR_WIDTH)
+        byte_lo_r = Signal()
+        byte_hi_r = Signal()
         wr_data_r = Signal(16)
         state_cnt = Signal(4, init=0xf)
         refresh_cnt = Signal(10)
@@ -196,9 +198,7 @@ class SDRAMController(Component):
         ]
 
         # Data masks: 0 while reading/writing, 1 otherwise
-        m.d.comb += sdram.dqm.eq(
-            Mux(state[4], Cat([~host.byte_lo, ~host.byte_hi]), 0b11)
-        )
+        m.d.comb += sdram.dqm.eq(Mux(state[4], Cat([~byte_lo_r, ~byte_hi_r]), 0b11))
 
         # Registered state, command and counters
         m.d.sync += [
@@ -214,8 +214,10 @@ class SDRAMController(Component):
         # Latch the request when it is accepted
         with m.If(accept):
             m.d.sync += [
-                haddr_r.eq(host.addr),
+                host_addr_r.eq(host.addr),
                 wr_data_r.eq(host.wdata),
+                byte_hi_r.eq(host.byte_hi),
+                byte_lo_r.eq(host.byte_lo),
             ]
 
         # Read response
@@ -235,9 +237,9 @@ class SDRAMController(Component):
 
         # Address generation for the SDRAM, based on the current state
         # Host address layout: | bank | row | column |
-        bank_bits = haddr_r[col_width + row_width:]
-        row_bits  = haddr_r[col_width:col_width + row_width]
-        col_bits  = haddr_r[:col_width]
+        bank_bits = host_addr_r[col_width + row_width:]
+        row_bits  = host_addr_r[col_width:col_width + row_width]
+        col_bits  = host_addr_r[:col_width]
 
         with m.If((state == State.READ_ACT) | (state == State.WRIT_ACT)):
             m.d.comb += [

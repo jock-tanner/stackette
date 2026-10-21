@@ -11,7 +11,13 @@ from sdram_controller import HOST_ADDR_WIDTH
 
 
 class MemoryTester(Component):
-    """Writes a pattern to every word, reads it back, flags mismatches."""
+    """
+    Writes a pattern to every word, reads it back, flags mismatches.
+
+    Uses full-word accesses only (both byte enables set). Each request is
+    held until accepted, so the tester needs no startup delay of its own:
+    it simply waits while the memory subsystem initializes.
+    """
     mem: Out(MemoryPort(HOST_ADDR_WIDTH))
 
     # status outputs
