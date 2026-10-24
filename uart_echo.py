@@ -2,9 +2,9 @@
 UART echo circuit for the "uart" example bundled with Amaranth 0.5.x
 (https://github.com/amaranth-lang/amaranth/blob/v0.5.x/examples/basic/uart.py).
 """
-
 from amaranth import *
-from uart import UART
+
+from uart import UARTCore
 
 
 class UARTEcho(Elaboratable):
@@ -25,7 +25,7 @@ class UARTEcho(Elaboratable):
     arriving before you handled the previous rx_ack overflow.
     """
     def __init__(self, divisor, data_bits=8):
-        self.uart = UART(divisor, data_bits)
+        self.uart = UARTCore(divisor, data_bits)
 
         # exposed for wiring to LEDs
         self.rx_err = Signal()
