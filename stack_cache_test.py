@@ -83,8 +83,7 @@ def run_case(seed, p_ready, n_commands):
         ctx.set(req.ready, 1)
         while True:
             _, _, valid, we, addr, wdata = await ctx.tick().sample(
-                req.valid, req.we, req.addr, req.wdata
-            )
+                req.valid, req.we, req.addr, req.wdata)
             for item in pending:
                 item[0] -= 1
             if valid and ready_now:
@@ -95,11 +94,10 @@ def run_case(seed, p_ready, n_commands):
                     pending.append([rng.randrange(1, 5) - 1, mem_rd(addr)])
             ready_now = rng.random() < p_ready
             ctx.set(req.ready, ready_now)
-            due = [item for item in pending if item[0] <= 0]
-            if due:
-                pending.remove(due[0])
+            if pending and pending[0][0] <= 0:  # in order: head only
+                head = pending.pop(0)
                 ctx.set(resp.valid, 1)
-                ctx.set(resp.data, due[0][1])
+                ctx.set(resp.data, head[1])
             else:
                 ctx.set(resp.valid, 0)
 
