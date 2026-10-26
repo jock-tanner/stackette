@@ -66,12 +66,6 @@ class Space(IntEnum, shape=2):
 
 PERIPH_PAGE = 0xF  # address bits 15:12 of the peripheral page
 
-# Initial pointer values from the memory map, for the CPU reset logic.
-IP_INIT = 0x0000
-RSP_INIT = 0xFFFE
-PSP_INIT = 0xEFFE
-SFP_INIT = 0xEFFE
-
 
 class MemorySelect(Component):
     def __init__(self, *, periph_addr_width=UART_ADDR_WIDTH):
