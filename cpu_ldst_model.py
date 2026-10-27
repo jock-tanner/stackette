@@ -20,9 +20,9 @@ OUT = 0x3000        # result dump
 TOP = 0xf008        # memory above the stack base, free to use
 MAX_DEPTH = 40
 
-OP_LD = 0
-OP_ST = 1
-OP_ADD, OP_ADC, OP_SUB, OP_SBC, OP_AND, OP_OR, OP_XOR, OP_BIC = range(2, 10)
+OP_ADD, OP_ADC, OP_SUB, OP_SBC, OP_AND, OP_OR, OP_XOR, OP_BIC = range(8)
+OP_LD = 8
+OP_ST = 9
 REG_TOS, REG_NOS, REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_IP = 0, 1, 2, 3, 4, 5, 15
 
 

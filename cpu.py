@@ -1,7 +1,7 @@
 from amaranth import *
 from amaranth.lib.wiring import Component, Out, connect, flipped
 
-from alu import ALU, OpCodes
+from alu import ALU
 from memory_port import MemoryPort
 from memory_select import CPU_ADDR_WIDTH, Space
 from stack_cache import Maint, Shift, StackCache
@@ -13,16 +13,16 @@ PSP_INIT = 0xf000
 SFP_INIT = 0xf000
 
 # Instruction word fields (see the ISA encoding table).
-OP_LD = 0
-OP_ST = 1
-OP_ADD = 2
-OP_ADC = 3
-OP_SUB = 4
-OP_SBC = 5
-OP_AND = 6
-OP_OR = 7
-OP_XOR = 8
-OP_BIC = 9
+OP_ADD = 0b0000
+OP_ADC = 0b0001
+OP_SUB = 0b0010
+OP_SBC = 0b0011
+OP_AND = 0b0100
+OP_OR = 0b0101
+OP_XOR = 0b0110
+OP_BIC = 0b0111
+OP_LD = 0b1000
+OP_ST = 0b1001
 FMT_IMM8 = 0
 FMT_PFP = 1
 FMT_GEN = 2
@@ -104,8 +104,10 @@ class CPU(Component):
         is_gen = fmt == FMT_GEN
         is_ld = (op == OP_LD) & (fmt != 3)
         is_st = (op == OP_ST) & (fmt != 3) & (fmt != FMT_IMM8)
-        is_alu = (op >= OP_ADD) & (op <= OP_BIC) & (fmt != 3)
-        is_logic = op >= OP_AND
+        is_alu = (op < OP_LD) & (fmt != 3)
+
+        # AND OR XOR BIC; only looked at for ALU ops, so one bit is enough
+        is_logic = op[2]
         reg_mode = is_gen & (mode == MODE_REG)
         ptr_mode = is_gen & (
                 (mode == MODE_PTR)
@@ -275,23 +277,11 @@ class CPU(Component):
             alu.size.eq(s),
             alu.carry_in.eq(sw[0]),
         ]
-        with m.Switch(op):
-            with m.Case(OP_ADD):
-                m.d.comb += alu.op_code.eq(OpCodes.ADD)
-            with m.Case(OP_ADC):
-                m.d.comb += alu.op_code.eq(OpCodes.ADC)
-            with m.Case(OP_SUB):
-                m.d.comb += alu.op_code.eq(OpCodes.SUB)
-            with m.Case(OP_SBC):
-                m.d.comb += alu.op_code.eq(OpCodes.SBC)
-            with m.Case(OP_AND):
-                m.d.comb += alu.op_code.eq(OpCodes.AND)
-            with m.Case(OP_OR):
-                m.d.comb += alu.op_code.eq(OpCodes.OR)
-            with m.Case(OP_XOR):
-                m.d.comb += alu.op_code.eq(OpCodes.XOR)
-            with m.Case(OP_BIC):
-                m.d.comb += alu.op_code.eq(OpCodes.BIC)
+
+        # two lower bits in CPU and ALU opcodes are matched, 3rd bit of CPU
+        # opcode selects arithmetic/logic ops and translates to 4th bit
+        # of ALU opcode
+        m.d.comb += alu.op_code.eq(Cat(op[:2], C(0), op[2]))
 
         # delay for display purpose
         after = 'WAIT' if self.crawl else 'FETCH'
