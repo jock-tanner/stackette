@@ -63,7 +63,6 @@ class Space(IntEnum, shape=2):
     PSTACK = 2
     DATA = 3
 
-
 PERIPH_PAGE = 0xF  # address bits 15:12 of the peripheral page
 
 
@@ -84,8 +83,9 @@ class MemorySelect(Component):
         cpu = self.cpu.req
         sel_flash, sel_ram, sel_periph = Signal(), Signal(), Signal()
         m.d.comb += [
-            sel_periph.eq((self.space == Space.DATA)
-                          & (cpu.addr[11:] == PERIPH_PAGE)),
+            sel_periph.eq(
+                (self.space == Space.DATA) & (cpu.addr[11:] == PERIPH_PAGE)
+            ),
             sel_flash.eq(cpu.addr[11:] == 0),
             sel_ram.eq(~sel_flash & ~sel_periph),
         ]
