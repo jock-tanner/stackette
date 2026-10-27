@@ -1,5 +1,5 @@
 """
-Pure-Python side of the LD/ST test: assembler, reference interpreter and
+Pure-Python side of the LD/ST/ALU test: assembler, reference interpreter and
 random program generator. No Amaranth in here.
 
 The reference is the architecture itself: registers plus ordinary flat memory,
@@ -22,6 +22,7 @@ MAX_DEPTH = 40
 
 OP_LD = 0
 OP_ST = 1
+OP_ADD, OP_ADC, OP_SUB, OP_SBC, OP_AND, OP_OR, OP_XOR, OP_BIC = range(2, 10)
 REG_TOS, REG_NOS, REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_IP = 0, 1, 2, 3, 4, 5, 15
 
 
@@ -59,6 +60,11 @@ class Ref:
         self.sfp = SFP0
         self.mbp = 0
         self.midx = 0
+        self.c = self.z = self.n = self.v = self.p = 0
+
+    @property
+    def flags(self):
+        return self.c | self.z << 1 | self.n << 2 | self.v << 3 | self.p << 4
 
     def rd16(self, a):
         a &= 0xfffe
@@ -108,6 +114,11 @@ class Ref:
         if op == OP_LD:
             v = self.ld_src(words, fmt, s, next_ip)
             self.ld_put(dd, v)
+        elif OP_ADD <= op <= OP_BIC:
+            b = self.ld_src(words, fmt, s, next_ip)
+            if fmt == 0 and op >= OP_AND:
+                b = w & 0xff
+            self.alu(op, dd, b, s)
         elif op == OP_ST and fmt != 0:
             v = self.item(dd & 1)
             if dd == 2:
@@ -117,6 +128,42 @@ class Ref:
                 self.psp += 2
                 self.wr16(self.psp, top)
             self.st_dst(words, fmt, s, v)
+
+    def alu(self, op, dd, b, s):
+        bits = 8 if s else 16
+        mask = (1 << bits) - 1
+        pos = 1 if dd in (1, 2) else 0
+        a = self.item(pos) & mask
+        b &= mask
+        sa, sb = sext(a, bits), sext(b, bits)
+        if op in (OP_ADD, OP_ADC, OP_SUB, OP_SBC):
+            if op == OP_ADD:
+                cin = 0
+            elif op == OP_SUB:
+                cin = 1
+            else:
+                cin = self.c
+            if op in (OP_ADD, OP_ADC):
+                full = a + b + cin
+                signed = sa + sb + cin
+            else:
+                full = a + (~b & mask) + cin
+                signed = sa - sb - (1 - cin)
+            r = full & mask
+            self.c = full >> bits & 1
+            self.v = int(not -(1 << (bits - 1)) <= signed < (1 << (bits - 1)))
+        else:
+            r = {OP_AND: a & b, OP_OR: a | b, OP_XOR: a ^ b, OP_BIC: a & ~b & mask}[op]
+        self.z = int(r == 0)
+        self.n = r >> (bits - 1) & 1
+        self.p = int(bin(r).count('1') % 2 == 0)
+        if dd == 0:
+            self.wr16(self.psp, r)
+        elif dd == 1:
+            self.wr16(self.psp + 2, r)
+        else:
+            self.psp += 2
+            self.wr16(self.psp, r)
 
     def ld_src(self, words, fmt, s, next_ip):
         w = words[0]
@@ -248,38 +295,57 @@ class Program:
         r = self.rng
         return r.choice([FAR + r.randrange(0x100), TOP + r.randrange(0x60)])
 
+    def src_ins(self, op, dd, s, d):
+        """A random instruction `op` with a source operand; d = depth before it."""
+        r = self.rng
+        kind = r.choice(['imm8', 'reg', 'imm16', 'pfp', 'ptr', 'abs', 'sp'])
+        if kind == 'imm8':
+            return i_imm8(op, dd, r.getrandbits(8))
+        if kind == 'reg':
+            regs = [REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_IP]
+            if d >= 1:
+                regs.append(REG_TOS)
+            if d >= 2:
+                regs.append(REG_NOS)
+            return i_gen(op, dd, s, 0, r.choice(regs))
+        if kind == 'imm16':
+            return i_gen(op, dd, s, 4, 0, r.getrandbits(16))
+        if kind == 'pfp':
+            return i_pfp(op, dd, s, r.randrange(-min(d, 64), 64))
+        if kind == 'ptr':
+            return i_gen(op, dd, s, r.choice([1, 2, 3]), s and r.getrandbits(1))
+        if kind == 'abs':
+            return i_gen(op, dd, s, 5, 0, self.addr_far())
+        if d < 1:
+            return None
+        return i_gen(op, dd, s, 6, r.randrange(min(d, 16)))
+
     def ld_one(self):
         r = self.rng
         dds = self.ld_dds()
         if not dds:
             return False
         dd = r.choice(dds)
-        d = self.depth
-        s = r.getrandbits(1)
-        kind = r.choice(['imm8', 'reg', 'imm16', 'pfp', 'ptr', 'abs', 'sp'])
-        if kind == 'imm8':
-            ins = i_imm8(OP_LD, dd, r.getrandbits(8))
-        elif kind == 'reg':
-            regs = [REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_IP]
-            if d >= 1:
-                regs.append(REG_TOS)
-            if d >= 2:
-                regs.append(REG_NOS)
-            ins = i_gen(OP_LD, dd, s, 0, r.choice(regs))
-        elif kind == 'imm16':
-            ins = i_gen(OP_LD, dd, s, 4, 0, r.getrandbits(16))
-        elif kind == 'pfp':
-            ins = i_pfp(OP_LD, dd, s, r.randrange(-min(d, 64), 64))
-        elif kind == 'ptr':
-            mode = r.choice([1, 2, 3])
-            ins = i_gen(OP_LD, dd, s, mode, s and r.getrandbits(1))
-        elif kind == 'abs':
-            ins = i_gen(OP_LD, dd, s, 5, 0, self.addr_far())
-        else:
-            if d < 1:
-                return False
-            ins = i_gen(OP_LD, dd, s, 6, r.randrange(min(d, 16)))
+        ins = self.src_ins(OP_LD, dd, r.getrandbits(1), self.depth)
+        if ins is None:
+            return False
         self.emit(ins, 1 if dd >= 2 else 0)
+        return True
+
+    def alu_one(self):
+        r = self.rng
+        d = self.depth
+        dds = [0] if d >= 1 else []
+        if d >= 2:
+            dds += [1, 2, 3]
+        if not dds:
+            return False
+        dd = r.choice(dds)
+        op = r.randrange(OP_ADD, OP_BIC + 1)
+        ins = self.src_ins(op, dd, r.getrandbits(1), d)
+        if ins is None:
+            return False
+        self.emit(ins, -1 if dd >= 2 else 0)
         return True
 
     def st_one(self):
@@ -332,9 +398,13 @@ class Program:
         s = r.getrandbits(1)
         if r.random() < 0.5:
             mode = r.choice([1, 2, 3]) if j >= 1 else r.choice([1, 2])
-            dds = self.ld_dds()
-            dd = r.choice(dds)
-            self.emit(i_gen(OP_LD, dd, s, mode, s and r.getrandbits(1)), 1 if dd >= 2 else 0)
+            if r.random() < 0.4:
+                dd = r.choice([0, 1, 2, 3])
+                self.emit(i_gen(r.randrange(OP_ADD, OP_BIC + 1), dd, s, mode, s and r.getrandbits(1)),
+                          -1 if dd >= 2 else 0)
+            else:
+                dd = r.choice(self.ld_dds())
+                self.emit(i_gen(OP_LD, dd, s, mode, s and r.getrandbits(1)), 1 if dd >= 2 else 0)
         else:
             dds = [dd for dd in self.st_dds() if dd < 2 or j >= 1]
             if not dds:
@@ -357,9 +427,12 @@ class Program:
                 self.block_set_sp()
             elif x < 0.17:
                 self.block_alias()
-            elif x < 0.55:
+            elif x < 0.40:
                 while not self.ld_one():
                     pass
+            elif x < 0.58:
+                while not self.alu_one():
+                    self.ld_one()
             else:
                 while not self.st_one():
                     self.ld_one()

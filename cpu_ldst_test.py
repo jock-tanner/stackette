@@ -1,5 +1,5 @@
 """
-Randomized test for cpu.py: LD and ST in all their formats.
+Randomized test for cpu.py: LD, ST and the ALU instructions in all their formats.
 
 A random program (cpu_ldst_model.Program) is put into code memory at address 0
 and the CPU runs it. Both of the CPU's memory ports (code/data `mem`, and the
@@ -10,7 +10,8 @@ The program ends by dumping MBP, MIDX and the whole parameter stack to a result
 area with ST instructions, so the stack and both registers are compared through
 memory. When the CPU asks for the word after the program, the test stops
 serving the code port, lets the stack cache drain, then compares the memory
-ranges that cpu_ldst_model.compare_ranges names with the reference interpreter.
+ranges that cpu_ldst_model.compare_ranges names, and the flags, with the
+reference interpreter.
 
 Run with `python test_cpu_ldst.py` (or pytest). Needs cpu_ldst_model.py.
 """
@@ -77,6 +78,8 @@ def run_case(seed, n_instr=150):
             raise AssertionError(f'seed {seed}: the program never finished')
         for _ in range(300):                # let the stack cache drain
             await ctx.tick()
+        flags = ctx.get(dut.sw) & 0x1f
+        assert flags == prog.ref.flags, f'seed {seed}: flags {flags:05b}, expected {prog.ref.flags:05b}'
         for lo, hi in compare_ranges(prog):
             for a in range(lo, hi):
                 got = store.get(a, junk(2 * a))

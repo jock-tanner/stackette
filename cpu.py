@@ -1,6 +1,7 @@
 from amaranth import *
 from amaranth.lib.wiring import Component, Out, connect, flipped
 
+from alu import ALU, OpCodes
 from memory_port import MemoryPort
 from memory_select import CPU_ADDR_WIDTH, Space
 from stack_cache import Maint, Shift, StackCache
@@ -14,6 +15,14 @@ SFP_INIT = 0xf000
 # Instruction word fields (see the ISA encoding table).
 OP_LD = 0
 OP_ST = 1
+OP_ADD = 2
+OP_ADC = 3
+OP_SUB = 4
+OP_SBC = 5
+OP_AND = 6
+OP_OR = 7
+OP_XOR = 8
+OP_BIC = 9
 FMT_IMM8 = 0
 FMT_PFP = 1
 FMT_GEN = 2
@@ -66,6 +75,8 @@ class CPU(Component):
         mbp = Signal(16)
         midx = Signal(16)
         sw = Signal(16)
+        # visible to testbenches
+        self.sw = sw
 
         # internal registers
         instr = Signal(16)  # the instruction word being executed
@@ -93,6 +104,8 @@ class CPU(Component):
         is_gen = fmt == FMT_GEN
         is_ld = (op == OP_LD) & (fmt != 3)
         is_st = (op == OP_ST) & (fmt != 3) & (fmt != FMT_IMM8)
+        is_alu = (op >= OP_ADD) & (op <= OP_BIC) & (fmt != 3)
+        is_logic = op >= OP_AND
         reg_mode = is_gen & (mode == MODE_REG)
         ptr_mode = is_gen & (
                 (mode == MODE_PTR)
@@ -108,7 +121,8 @@ class CPU(Component):
         mem_operand = is_pfp | ptr_mode | abs_mode | sp_mem
         ok_ld = is_ld & ~(is_gen & (mode == 7))
         ok_st = is_st & ~(is_gen & ((mode == MODE_IMM16) | (mode == 7)))
-        ok = ok_ld | ok_st
+        ok_alu = is_alu & ~(is_gen & (mode == 7))
+        ok = ok_ld | ok_st | ok_alu
 
         size = Signal(2)  # value to step midx
         m.d.comb += size.eq(Mux(s, 1, 2))
@@ -201,7 +215,8 @@ class CPU(Component):
 
         src_raw = Signal(16)
         with m.If(is_imm8):
-            m.d.comb += src_raw.eq(imm8s)
+            # imm8 is sign-extended, except for the logical ops
+            m.d.comb += src_raw.eq(Mux(is_logic, instr[0:8], imm8s))
         with m.Elif(imm16_mode):
             m.d.comb += src_raw.eq(extra)
         with m.Elif(reg_mode):
@@ -243,6 +258,40 @@ class CPU(Component):
             st_item.eq(lines[st_pos]),
             st_need.eq(need_of(st_pos)),
         ]
+
+        # ---- ALU ----
+        # ADD ADC SUB SBC AND OR XOR BIC take their source like LD. `dd` picks
+        # the other operand and what happens to the stack: 00 TOS op= src,
+        # 01 NOS op= src, 10 NOS op= src and drop TOS, 11 TOS op= src and
+        # remove NOS. Arithmetic ops set C Z N V P, logical ops only Z N P.
+        # A byte result is zero-extended into the destination word.
+        m.submodules.alu = alu = ALU()
+        # the destination item: TOS for dd 0 and 3, NOS for dd 1 and 2
+        alu_pos = Signal(2)
+        m.d.comb += [
+            alu_pos.eq(dd[0] ^ dd[1]),
+            alu.operand_a.eq(lines[alu_pos]),
+            alu.operand_b.eq(src),
+            alu.size.eq(s),
+            alu.carry_in.eq(sw[0]),
+        ]
+        with m.Switch(op):
+            with m.Case(OP_ADD):
+                m.d.comb += alu.op_code.eq(OpCodes.ADD)
+            with m.Case(OP_ADC):
+                m.d.comb += alu.op_code.eq(OpCodes.ADC)
+            with m.Case(OP_SUB):
+                m.d.comb += alu.op_code.eq(OpCodes.SUB)
+            with m.Case(OP_SBC):
+                m.d.comb += alu.op_code.eq(OpCodes.SBC)
+            with m.Case(OP_AND):
+                m.d.comb += alu.op_code.eq(OpCodes.AND)
+            with m.Case(OP_OR):
+                m.d.comb += alu.op_code.eq(OpCodes.OR)
+            with m.Case(OP_XOR):
+                m.d.comb += alu.op_code.eq(OpCodes.XOR)
+            with m.Case(OP_BIC):
+                m.d.comb += alu.op_code.eq(OpCodes.BIC)
 
         # delay for display purpose
         after = 'WAIT' if self.crawl else 'FETCH'
@@ -314,9 +363,12 @@ class CPU(Component):
                     m.next = 'EXEC'
 
             with m.State('EXEC'):
-                with m.If(is_ld):
+                with m.If(is_ld | is_alu):
+                    # the source is fetched the same way for LD and the ALU
                     with m.If(mem_operand):
                         m.next = 'LD_COH'
+                    with m.Elif(is_alu):
+                        m.next = 'ALU_DELIVER'
                     with m.Else():
                         m.next = 'LD_DELIVER'
                 with m.Elif(is_st):
@@ -366,7 +418,10 @@ class CPU(Component):
                         )
                     with m.Else():
                         m.d.sync += val.eq(resp.data)
-                    m.next = 'LD_DELIVER'
+                    with m.If(is_alu):
+                        m.next = 'ALU_DELIVER'
+                    with m.Else():
+                        m.next = 'LD_DELIVER'
 
             # ---- LD: put the value on the stack ----
             with m.State('LD_DELIVER'):
@@ -398,6 +453,36 @@ class CPU(Component):
                             cmd.arg.eq(src),
                         ]
                 with m.If(cmd.ready):
+                    m.next = after
+
+            # ---- ALU: result and flags in one cache command ----
+            # the write uses the numbering before the shift: dd 2 writes NOS
+            # and then the pop moves it to TOS, dd 3 writes TOS and then NOS
+            # is removed
+            with m.State('ALU_DELIVER'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.need.eq(ld_need | need_of(alu_pos)),
+                    cmd.w0_en.eq(1),
+                    cmd.w0_pos.eq(alu_pos),
+                    cmd.w0_data.eq(alu.result),
+                ]
+                with m.Switch(dd):
+                    with m.Case(2):
+                        m.d.comb += cmd.shift.eq(Shift.POP)
+                    with m.Case(3):
+                        m.d.comb += cmd.shift.eq(Shift.POP_UNDER)
+                with m.If(cmd.ready):
+                    m.d.sync += [
+                        sw[1].eq(alu.zero),
+                        sw[2].eq(alu.sign),
+                        sw[4].eq(alu.parity),
+                    ]
+                    with m.If(~is_logic):
+                        m.d.sync += [
+                            sw[0].eq(alu.carry),
+                            sw[3].eq(alu.overflow),
+                        ]
                     m.next = after
 
             # ---- ST: take the value off the stack ----
