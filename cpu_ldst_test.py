@@ -1,6 +1,6 @@
 """
 Randomized test for cpu.py: LD, ST, the ALU and the control flow instructions (calls, returns,
-jumps, ADDP).
+jumps, SKIP, ADDP).
 
 A random program (cpu_ldst_model.Program) is put into code memory at address 0
 and the CPU runs it. Both of the CPU's memory ports (code/data `mem`, and the

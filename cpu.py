@@ -1,7 +1,7 @@
 from amaranth import *
 from amaranth.lib.wiring import Component, Out, connect, flipped
 
-from alu import ALU, OpCodes
+from alu import ALU
 from memory_port import MemoryPort
 from memory_select import CPU_ADDR_WIDTH, Space
 from stack_cache import Maint, Shift, StackCache
@@ -92,6 +92,8 @@ class CPU(Component):
         val = Signal(16)    # the operand in transit
         lane = Signal()     # address bit 0 of a byte load
         link = Signal(16)   # the caller's frame pointer, read by RET
+        # set by SKIP: the next instruction is fetched but not executed
+        skipping = Signal()
 
         m.d.comb += self.space.eq(Space.CODE)
 
@@ -120,6 +122,7 @@ class CPU(Component):
         grp = instr[12:14]
         misc_op = instr[6:11]
         is_bra = is_ctl & (grp == 0) & ~instr[11]
+        is_skip = is_ctl & (grp == 0) & instr[11] & ~instr[10]
         is_addp = is_ctl & (grp == 1) & (instr[10:12] == 1) & (instr[8:10] != 3)
         is_call_rel = is_ctl & (grp == 3) & ~instr[11]
         is_misc = is_ctl & (grp == 3) & instr[11]
@@ -148,7 +151,7 @@ class CPU(Component):
         ok_st = is_st & ~(is_gen & ((mode == MODE_IMM16) | (mode == 7)))
         ok_alu = is_alu & ~(is_gen & (mode == 7))
         ok_ctl = (
-                is_bra | is_addp | is_call_rel | is_ret
+                is_bra | is_skip | is_addp | is_call_rel | is_ret
                 | is_call_abs | is_jmp_abs | is_call_pop
         )
         ok = ok_ld | ok_st | ok_alu | ok_ctl
@@ -288,6 +291,30 @@ class CPU(Component):
             st_need.eq(need_of(st_pos)),
         ]
 
+        # ---- SKIP condition ----
+        # the flags in `sw`: C, Z, N, V, P (even parity)
+        flag_c, flag_z, flag_n, flag_v, flag_p = sw[0], sw[1], sw[2], sw[3], sw[4]
+        conditions = Array([
+            flag_z,                                 # 0 EQ
+            ~flag_z,                                # 1 NE
+            flag_c,                                 # 2 CS (unsigned >=)
+            ~flag_c,                                # 3 CC (unsigned <)
+            flag_n,                                 # 4 MI
+            ~flag_n,                                # 5 PL
+            flag_v,                                 # 6 VS
+            ~flag_v,                                # 7 VC
+            flag_c & ~flag_z,                       # 8 HI (unsigned >)
+            ~flag_c | flag_z,                       # 9 LS (unsigned <=)
+            flag_n == flag_v,                       # 10 GE
+            flag_n != flag_v,                       # 11 LT
+            ~flag_z & (flag_n == flag_v),           # 12 GT
+            flag_z | (flag_n != flag_v),            # 13 LE
+            flag_p,                                 # 14 PE (parity even)
+            ~flag_p,                                # 15 PO (parity odd)
+        ])
+        cond = Signal()
+        m.d.comb += cond.eq(conditions[instr[6:10]])
+
         # ---- control flow ----
         # BRA and CALL rel11: signed offset in words from the next instruction
         rel_off = Signal(signed(12))
@@ -374,7 +401,15 @@ class CPU(Component):
                     m.next = 'DECODE'
 
             with m.State('DECODE'):
-                with m.If(~ok):
+                with m.If(skipping):
+                    # fetch the skipped instruction's extra word, if it has
+                    # one, to get past it, and do not execute it
+                    with m.If(needs_extra):
+                        m.next = 'EXTRA'
+                    with m.Else():
+                        m.d.sync += skipping.eq(0)
+                        m.next = after
+                with m.Elif(~ok):
                     m.next = after
                 with m.Elif(needs_extra):
                     m.next = 'EXTRA'
@@ -399,7 +434,11 @@ class CPU(Component):
                         ip.eq(ip + 2),
                         extra.eq(resp.data),
                     ]
-                    m.next = 'EXEC'
+                    with m.If(skipping):
+                        m.d.sync += skipping.eq(0)
+                        m.next = after
+                    with m.Else():
+                        m.next = 'EXEC'
 
             with m.State('EXEC'):
                 with m.If(is_ld | is_alu):
@@ -414,6 +453,9 @@ class CPU(Component):
                     m.next = 'ST_POP'
                 with m.Elif(is_bra | is_jmp_abs):
                     m.d.sync += ip.eq(tgt)
+                    m.next = after
+                with m.Elif(is_skip):
+                    m.d.sync += skipping.eq(cond)
                     m.next = after
                 with m.Elif(is_addp):
                     with m.Switch(instr[8:10]):

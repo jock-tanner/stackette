@@ -63,6 +63,10 @@ def i_call_rel(rel):
     return [0xf000 | (rel & 0x7ff)]
 
 
+def i_skip(cc):
+    return [0xc800 | (cc << 6)]
+
+
 def i_addp(rr, i):
     return [0xd400 | (rr << 8) | (i & 0xff)]
 
@@ -161,6 +165,19 @@ class Ref:
             return 2 if (w >> 6) & 31 in (MISC_CALL_ABS, MISC_JMP_ABS) else 1
         return 1
 
+    @staticmethod
+    def is_skip(w):
+        return w >> 14 == 3 and (w >> 12) & 3 == 0 and w & 0xc00 == 0x800
+
+    def cond(self, cc):
+        c, z, n, v, p = self.c, self.z, self.n, self.v, self.p
+        return int([
+            z, not z, c, not c, n, not n, v, not v,
+            c and not z, not c or z,
+            n == v, n != v, not z and n == v, z or n != v,
+            p, not p,
+        ][cc])
+
     def call(self, target, ret):
         self.rsp = (self.rsp - 2) & 0xffff
         self.wr16(self.rsp, ret)
@@ -218,6 +235,11 @@ class Ref:
         for _ in range(100000):
             if pc == stop:
                 return
+            if self.is_skip(code[pc >> 1]):
+                pc += 2
+                if self.cond((code[(pc - 2) >> 1] >> 6) & 15):
+                    pc += 2 * self.length(code[pc >> 1])
+                continue
             n = self.length(code[pc >> 1])
             nxt = pc + 2 * n
             target = self.step(code[pc >> 1:(pc >> 1) + n], nxt)
@@ -433,9 +455,9 @@ class Program:
             return None
         return i_gen(op, dd, s, 6, r.randrange(min(d, 16)))
 
-    def ld_one(self):
+    def ld_one(self, neutral=False):
         r = self.rng
-        dds = self.ld_dds()
+        dds = [dd for dd in self.ld_dds() if dd < 2 or not neutral]
         if not dds:
             return False
         dd = r.choice(dds)
@@ -445,12 +467,12 @@ class Program:
         self.emit(ins, 1 if dd >= 2 else 0)
         return True
 
-    def alu_one(self):
+    def alu_one(self, neutral=False):
         r = self.rng
         d = self.depth
         dds = [0] if d >= 1 else []
         if d >= 2:
-            dds += [1, 2, 3]
+            dds += [1] if neutral else [1, 2, 3]
         if not dds:
             return False
         dd = r.choice(dds)
@@ -471,9 +493,9 @@ class Program:
         cands = list(range(-min(d, 64), 0)) + list(range(2 if variadic else 1, words + 1))
         return r.choice(cands) if cands else None
 
-    def st_one(self):
+    def st_one(self, neutral=False):
         r = self.rng
-        dds = self.st_dds()
+        dds = [dd for dd in self.st_dds() if dd < 2 or not neutral]
         if not dds:
             return False
         dd = r.choice(dds)
@@ -551,6 +573,29 @@ class Program:
             self.emit_plain(i_misc(MISC_JMP_ABS, extra=self.addr + 4 + 2 * k))
         self.words += [r.getrandbits(16) for _ in range(k)]
 
+    def block_skip_cc(self):
+        """SKIP cc and an instruction that does not change the stack depth, so that
+        the depth is the same whether it runs or not."""
+        r = self.rng
+        if self.depth < 1:
+            return
+        cc = r.randrange(16)
+        self.emit_plain(i_skip(cc))
+        live = self.live
+        if live and self.ref.cond(cc):
+            self.live = False       # skipped: only put the words in
+        while True:
+            x = r.random()
+            if x < 0.4:
+                done = self.ld_one(neutral=True)
+            elif x < 0.8:
+                done = self.alu_one(neutral=True)
+            else:
+                done = self.st_one(neutral=True)
+            if done:
+                break
+        self.live = live
+
     def emit_plain(self, ins):
         """Instructions the reference does not execute here: the jump skips the junk."""
         self.words += ins
@@ -622,6 +667,8 @@ class Program:
                 self.call_func(func)
         elif x < 0.62:
             self.block_skip()
+        elif x < 0.70:
+            self.block_skip_cc()
         else:
             while not self.st_one():
                 self.ld_one()
