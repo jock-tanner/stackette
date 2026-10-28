@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Read, write, erase and verify the SPI flash in place, through the UART to SPI
 bridge (spi_bridge.py, built by de0nano_flash_programmer.py).

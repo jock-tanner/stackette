@@ -13,8 +13,10 @@ Checked, per op (see ref() for the exact definitions):
   * zero, sign, parity   all ops (parity = 1 when the number of set bits in
                  the result is even, over the full operand length)
 
+RRC (rotate right through carry) also checks carry: it is the bit that fell out.
+
 Not checked: carry and overflow for the logical ops (AND, OR, XOR, BIC, NOT,
-SXT, BSWAP). The ISA leaves C and V unchanged for those, which is decided
+SXT, BSWAP), and overflow for RRC. The ISA leaves C and V unchanged for those, which is decided
 outside the ALU, so any value is fine.
 
 SXT and BSWAP are word operations: they are only tested with size = word, and
@@ -39,7 +41,7 @@ CHECK_PARITY = True
 
 LOGIC = {
     OpCodes.AND, OpCodes.OR, OpCodes.XOR, OpCodes.BIC, OpCodes.NOT,
-    OpCodes.SXT, OpCodes.BSWAP,
+    OpCodes.SXT, OpCodes.BSWAP, OpCodes.RRC
 }
 WORD_ONLY = {OpCodes.SXT, OpCodes.BSWAP}
 FIELDS = ('result', 'carry', 'overflow', 'zero', 'sign', 'parity')
@@ -82,6 +84,9 @@ def ref(op, a, b, cin, bits):
         res = (a & 0xFF) | (0xFF00 if a & 0x80 else 0)
     elif op == OpCodes.BSWAP:
         res = ((a & 0xFF) << 8) | (a >> 8)
+    elif op == OpCodes.RRC:
+        res = (cin << (bits - 1)) | (a >> 1)
+        carry = a & 1
     elif op == OpCodes.NEG:
         res = (-a) & mask
         zero_src = int(a == 0)
@@ -92,11 +97,11 @@ def ref(op, a, b, cin, bits):
 
     return {
         'result': res,
-        'carry': None if op in LOGIC else carry,
+        'carry': carry if op == OpCodes.RRC or op not in LOGIC else None,
         'overflow': None if op in LOGIC else overflow,
         'zero': int(res == 0),
         'sign': int(bool(res & msb)),
-        'parity': int(bin(res).count("1") % 2 == 0) if CHECK_PARITY else None,
+        'parity': int(bin(res).count('1') % 2 == 0) if CHECK_PARITY else None,
     }
 
 
@@ -106,8 +111,8 @@ def vectors(rng, n_random=3000):
         mask = (1 << bits) - 1
         msb = 1 << (bits - 1)
         corners = sorted({
-            0, 1, 2, msb - 1, msb, msb + 1, mask - 1, mask, 0x5555 & mask,
-            0xAAAA & mask,
+            0, 1, 2, msb - 1, msb, msb + 1, mask - 1, mask,
+            0x5555 & mask, 0xAAAA & mask,
         })
 
         def widen(v):
@@ -157,11 +162,15 @@ def test_alu():
     sim.run()
 
     if failures:
-        print(f'FAILED: {sum(map(len, failures.values()))} mismatches '
-              f'in {count} vectors')
+        print(
+            f'FAILED: {sum(map(len, failures.values()))} mismatches '
+            f'in {count} vectors'
+        )
         for (name, bits, field), msgs in sorted(failures.items()):
-            print(f'  {name:3} {bits:2}-bit {field:8} x{len(msgs):<5} '
-                  f'first: {msgs[0]}')
+            print(
+                f'  {name:3} {bits:2}-bit {field:8} x{len(msgs):<5} '
+                f'first: {msgs[0]}'
+            )
         raise AssertionError('ALU does not match the model!')
     print(f'ok: {count} vectors')
 

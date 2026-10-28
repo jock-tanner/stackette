@@ -23,6 +23,7 @@ MAX_DEPTH = 40
 OP_ADD, OP_ADC, OP_SUB, OP_SBC, OP_AND, OP_OR, OP_XOR, OP_BIC = range(8)
 OP_LD = 8
 OP_ST = 9
+U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC = range(6)
 REG_TOS, REG_NOS, REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_SR, REG_IP = 0, 1, 2, 3, 4, 5, 6, 15
 SR_MASK = 0x1f
 
@@ -74,6 +75,10 @@ def i_setb(i):
 
 def i_clrb(i):
     return [0xd100 | (i & 0xff)]
+
+
+def i_unary(op, dd, s):
+    return [0xe000 | dd << 8 | s << 7 | op << 3]
 
 
 def i_addp(rr, i):
@@ -228,6 +233,9 @@ class Ref:
             elif rr == 2:
                 self.psp += i
             return None
+        if grp == 2 and (w >> 10) & 3 == 0:
+            self.unary((w >> 3) & 15, (w >> 8) & 3, (w >> 7) & 1)
+            return None
         if grp == 3 and not w & 0x800:
             return self.call(rel, next_ip)
         if grp == 3:
@@ -261,6 +269,35 @@ class Ref:
             target = self.step(code[pc >> 1:(pc >> 1) + n], nxt)
             pc = nxt if target is None else target
         raise AssertionError('reference run does not finish')
+
+    def unary(self, op, dd, s):
+        # the operand is the item the ALU ops use: TOS for dd 0 and 3, NOS for 1 and 2
+        pos = (dd & 1) ^ (dd >> 1)
+        bits = 8 if s else 16
+        mask = (1 << bits) - 1
+        a = self.item(pos) & mask
+        if op == U_NOT:
+            r = ~a & mask
+        elif op == U_NEG:
+            r = -a & mask
+            self.c = int(a == 0)
+            self.v = int(a == 1 << (bits - 1))
+        elif op == U_SXT:
+            r = sext(a & 0xff, 8) & 0xffff
+        elif op == U_BSWAP:
+            r = (a & 0xff) << 8 | a >> 8
+        elif op == U_RLC:
+            full = a << 1 | self.c
+            r = full & mask
+            self.c = full >> bits & 1
+            self.v = (a >> (bits - 1) ^ r >> (bits - 1)) & 1
+        else:
+            r = self.c << (bits - 1) | a >> 1
+            self.c = a & 1
+        self.z = int(r == 0)
+        self.n = r >> (bits - 1) & 1
+        self.p = int(bin(r).count('1') % 2 == 0)
+        self.ld_put(dd, r)
 
     def alu(self, op, dd, b, s):
         bits = 8 if s else 16
@@ -501,6 +538,24 @@ class Program:
         self.emit(ins, -1 if dd >= 2 else 0)
         return True
 
+    def unary_one(self):
+        d = self.depth
+        if d < 1:
+            return False
+        r = self.rng
+        dds = [0]
+        if d >= 2:
+            dds += [1]
+        if d >= 2 and d < self.max_depth:
+            dds += [2]
+        if d < self.max_depth:
+            dds += [3]
+        dd = r.choice(dds)
+        op = r.randrange(6)
+        s = 0 if op in (U_SXT, U_BSWAP) else r.getrandbits(1)
+        self.emit(i_unary(op, dd, s), 1 if dd >= 2 else 0)
+        return True
+
     def pfp_store(self, d):
         """A word offset for a store relative to PFP, or None. In a function it must not
         hit the saved PFP or the count: only the stack items below PFP and the arguments."""
@@ -691,6 +746,9 @@ class Program:
             self.block_skip_cc()
         elif x < 0.74:
             self.emit(r.choice([i_setb, i_clrb])(r.getrandbits(8)))
+        elif x < 0.80:
+            if not self.unary_one():
+                self.ld_one()
         else:
             while not self.st_one():
                 self.ld_one()

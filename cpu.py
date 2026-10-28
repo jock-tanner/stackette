@@ -1,7 +1,7 @@
 from amaranth import *
 from amaranth.lib.wiring import Component, Out, connect, flipped
 
-from alu import ALU
+from alu import ALU, OpCodes
 from memory_port import MemoryPort
 from memory_select import CPU_ADDR_WIDTH, Space
 from stack_cache import Maint, Shift, StackCache
@@ -44,6 +44,13 @@ REG_IP = 15
 # the status register bits that exist: C Z N V P. The others read as zero
 # and ignore writes.
 SR_MASK = 0b11111
+# unary operations, format 11 group 2: 11 10 00 dd s oooo 000
+UOP_NOT = 0
+UOP_NEG = 1
+UOP_SXT = 2
+UOP_BSWAP = 3
+UOP_RLC = 4
+UOP_RRC = 5
 MISC_RET_N = 1
 MISC_CALL_ABS = 5
 MISC_JMP_ABS = 6
@@ -130,6 +137,9 @@ class CPU(Component):
         # SETB and CLRB: 11 01 00 0o iiiiiiii
         is_setclr = is_ctl & (grp == 1) & (instr[10:12] == 0) & ~instr[9]
         is_addp = is_ctl & (grp == 1) & (instr[10:12] == 1) & (instr[8:10] != 3)
+        # unary operations: 11 10 00 dd s oooo 000, `dd` and `s` as usual
+        is_unary = is_ctl & (grp == 2) & (instr[10:12] == 0)
+        u_op = instr[3:7]
         is_call_rel = is_ctl & (grp == 3) & ~instr[11]
         is_misc = is_ctl & (grp == 3) & instr[11]
         # RET #n drops n argument words; RET takes the count from the frame
@@ -156,8 +166,14 @@ class CPU(Component):
         ok_ld = is_ld & ~(is_gen & (mode == 7))
         ok_st = is_st & ~(is_gen & ((mode == MODE_IMM16) | (mode == 7)))
         ok_alu = is_alu & ~(is_gen & (mode == 7))
+        # SXT and BSWAP are word operations
+        ok_unary = (
+                is_unary & (u_op < 6)
+                & ~(s & ((u_op == UOP_SXT) | (u_op == UOP_BSWAP)))
+        )
         ok_ctl = (
-                is_bra | is_skip | is_setclr | is_addp | is_call_rel | is_ret
+                is_bra | is_skip | is_setclr | is_addp | ok_unary | is_call_rel
+                | is_ret
                 | is_call_abs | is_jmp_abs | is_call_pop
         )
         ok = ok_ld | ok_st | ok_alu | ok_ctl
@@ -352,20 +368,52 @@ class CPU(Component):
         # remove NOS. Arithmetic ops set C Z N V P, logical ops only Z N P.
         # A byte result is zero-extended into the destination word.
         m.submodules.alu = alu = ALU()
-        # the destination item: TOS for dd 0 and 3, NOS for dd 1 and 2
+        # the destination item: TOS for dd 0 and 3, NOS for dd 1 and 2. The
+        # unary operations use the same item as their operand.
         alu_pos = Signal(2)
         m.d.comb += [
             alu_pos.eq(dd[0] ^ dd[1]),
             alu.operand_a.eq(lines[alu_pos]),
-            alu.operand_b.eq(src),
             alu.size.eq(s),
             alu.carry_in.eq(sw[0]),
         ]
+        # the unary operations are done by the same ALU: they have no source
+        # operand, and RLC is ADC of the item with itself
+        with m.If(is_unary):
+            m.d.comb += alu.operand_b.eq(lines[alu_pos])
+        with m.Else():
+            m.d.comb += alu.operand_b.eq(src)
+        # which flags the operation sets besides Z N P: NEG and RLC set C and
+        # V, RRC sets C, NOT SXT and BSWAP neither
+        set_c = Signal()
+        set_v = Signal()
+        with m.If(is_unary):
+            m.d.comb += [
+                set_c.eq((u_op == UOP_NEG) | (u_op == UOP_RLC) | (u_op == UOP_RRC)),
+                set_v.eq((u_op == UOP_NEG) | (u_op == UOP_RLC)),
+            ]
+        with m.Else():
+            m.d.comb += [set_c.eq(~is_logic), set_v.eq(~is_logic)]
 
         # two lower bits in CPU and ALU opcodes are matched, 3rd bit of CPU
         # opcode selects arithmetic/logic ops and translates to 4th bit
         # of ALU opcode
-        m.d.comb += alu.op_code.eq(Cat(op[:2], C(0), op[2]))
+        with m.If(is_unary):
+            with m.Switch(u_op):
+                with m.Case(UOP_NOT):
+                    m.d.comb += alu.op_code.eq(OpCodes.NOT)
+                with m.Case(UOP_NEG):
+                    m.d.comb += alu.op_code.eq(OpCodes.NEG)
+                with m.Case(UOP_SXT):
+                    m.d.comb += alu.op_code.eq(OpCodes.SXT)
+                with m.Case(UOP_BSWAP):
+                    m.d.comb += alu.op_code.eq(OpCodes.BSWAP)
+                with m.Case(UOP_RLC):
+                    m.d.comb += alu.op_code.eq(OpCodes.ADC)
+                with m.Case(UOP_RRC):
+                    m.d.comb += alu.op_code.eq(OpCodes.RRC)
+        with m.Else():
+            m.d.comb += alu.op_code.eq(Cat(op[:2], C(0), op[2]))
 
         # delay for display purpose
         after = 'WAIT' if self.crawl else 'FETCH'
@@ -457,6 +505,8 @@ class CPU(Component):
                         m.next = 'ALU_DELIVER'
                     with m.Else():
                         m.next = 'LD_DELIVER'
+                with m.Elif(is_unary):
+                    m.next = 'ALU_DELIVER'
                 with m.Elif(is_st):
                     m.next = 'ST_POP'
                 with m.Elif(is_bra | is_jmp_abs):
@@ -581,22 +631,38 @@ class CPU(Component):
                     cmd.w0_pos.eq(alu_pos),
                     cmd.w0_data.eq(alu.result),
                 ]
-                with m.Switch(dd):
-                    with m.Case(2):
-                        m.d.comb += cmd.shift.eq(Shift.POP)
-                    with m.Case(3):
-                        m.d.comb += cmd.shift.eq(Shift.POP_UNDER)
+                with m.If(is_unary):
+                    # dd 0 and 1 replace the operand, 2 and 3 keep it and
+                    # push the result on top or under TOS
+                    with m.Switch(dd):
+                        with m.Case(2):
+                            m.d.comb += [
+                                cmd.w0_en.eq(0),
+                                cmd.shift.eq(Shift.PUSH),
+                                cmd.arg.eq(alu.result),
+                            ]
+                        with m.Case(3):
+                            m.d.comb += [
+                                cmd.w0_en.eq(0),
+                                cmd.shift.eq(Shift.PUSH_UNDER),
+                                cmd.arg.eq(alu.result),
+                            ]
+                with m.Else():
+                    with m.Switch(dd):
+                        with m.Case(2):
+                            m.d.comb += cmd.shift.eq(Shift.POP)
+                        with m.Case(3):
+                            m.d.comb += cmd.shift.eq(Shift.POP_UNDER)
                 with m.If(cmd.ready):
                     m.d.sync += [
                         sw[1].eq(alu.zero),
                         sw[2].eq(alu.sign),
                         sw[4].eq(alu.parity),
                     ]
-                    with m.If(~is_logic):
-                        m.d.sync += [
-                            sw[0].eq(alu.carry),
-                            sw[3].eq(alu.overflow),
-                        ]
+                    with m.If(set_c):
+                        m.d.sync += sw[0].eq(alu.carry)
+                    with m.If(set_v):
+                        m.d.sync += sw[3].eq(alu.overflow)
                     m.next = after
 
             # ---- ADDP SP: the same as storing to SP ----

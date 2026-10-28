@@ -21,6 +21,8 @@ class OpCodes(Enum, shape=4):
     # word only
     SXT = 0b1101
     BSWAP = 0b1110
+    # rotate right through carry, sets carry to the bit that fell out
+    RRC = 0b1111
 
 
 class Adder(Component):
@@ -110,6 +112,12 @@ class ALU(Component):
                     m.d.comb += i_result.eq(Cat(i_a[:8], i_a[7].replicate(8)))
                 with m.Case(OpCodes.BSWAP):
                     m.d.comb += self.result.eq(Cat(i_a[8:], i_a[:8]))
+                with m.Case(OpCodes.RRC):
+                    with m.If(self.size):
+                        m.d.comb += i_result.eq(Cat(i_a[1:8], self.carry_in))
+                    with m.Else():
+                        m.d.comb += i_result.eq(Cat(i_a[1:16], self.carry_in))
+                    m.d.comb += self.carry.eq(i_a[0])
         with m.Else():
             # arithmetic
             m.d.comb += i_result.eq(adder.sum[:16])
