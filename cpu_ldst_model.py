@@ -1,5 +1,5 @@
 """
-Pure-Python side of the LD/ST/ALU test: assembler, reference interpreter and
+Pure-Python side of the LD/ST/ALU/control-flow test: assembler, reference interpreter and
 random program generator. No Amaranth in here.
 
 The reference is the architecture itself: registers plus ordinary flat memory,
@@ -51,6 +51,27 @@ def i_gen(op, dd, s, mode, x, extra=None):
     return [w] if extra is None else [w, extra & 0xffff]
 
 
+# control format 11
+MISC_RET_N, MISC_CALL_ABS, MISC_JMP_ABS, MISC_CALL_POP, MISC_RET_VAR = 1, 5, 6, 7, 9
+
+
+def i_bra(rel):
+    return [0xc000 | (rel & 0x7ff)]
+
+
+def i_call_rel(rel):
+    return [0xf000 | (rel & 0x7ff)]
+
+
+def i_addp(rr, i):
+    return [0xd400 | (rr << 8) | (i & 0xff)]
+
+
+def i_misc(op, p=0, extra=None):
+    w = 0xf800 | (op << 6) | p
+    return [w] if extra is None else [w, extra & 0xffff]
+
+
 # ---- reference interpreter ----
 
 class Ref:
@@ -60,6 +81,7 @@ class Ref:
         self.sfp = SFP0
         self.mbp = 0
         self.midx = 0
+        self.rsp = 0
         self.c = self.z = self.n = self.v = self.p = 0
 
     @property
@@ -109,7 +131,7 @@ class Ref:
         op = (w >> 10) & 15
         dd = (w >> 8) & 3
         if fmt == 3:
-            return
+            return self.ctl(words, next_ip)
         s = (w >> 7) & 1 if fmt else 0
         if op == OP_LD:
             v = self.ld_src(words, fmt, s, next_ip)
@@ -128,6 +150,79 @@ class Ref:
                 self.psp += 2
                 self.wr16(self.psp, top)
             self.st_dst(words, fmt, s, v)
+
+    @staticmethod
+    def length(w):
+        """Words in the instruction that starts with w."""
+        fmt = w >> 14
+        if fmt == 2:
+            return 2 if (w >> 4) & 7 in (4, 5) else 1
+        if fmt == 3 and (w >> 12) & 3 == 3 and w & 0x800:
+            return 2 if (w >> 6) & 31 in (MISC_CALL_ABS, MISC_JMP_ABS) else 1
+        return 1
+
+    def call(self, target, ret):
+        self.rsp = (self.rsp - 2) & 0xffff
+        self.wr16(self.rsp, ret)
+        self.psp -= 2
+        self.wr16(self.psp, self.sfp)
+        self.sfp = self.psp
+        return target
+
+    def ret(self, n):
+        if n is None:
+            n = self.rd16(self.sfp + 2)
+        link = self.rd16(self.sfp)
+        self.psp = (self.sfp + 2 + 2 * n) & 0xffff
+        self.sfp = link
+        ip = self.rd16(self.rsp)
+        self.rsp = (self.rsp + 2) & 0xffff
+        return ip
+
+    def ctl(self, words, next_ip):
+        """A control format instruction: returns the new IP, or None to go on."""
+        w = words[0]
+        grp = (w >> 12) & 3
+        rel = (next_ip + 2 * sext(w & 0x7ff, 11)) & 0xffff
+        if grp == 0 and not w & 0x800:
+            return rel
+        if grp == 1 and (w >> 10) & 3 == 1:
+            rr, i = (w >> 8) & 3, sext(w & 0xff, 8)
+            if rr == 0:
+                self.mbp = (self.mbp + i) & 0xffff
+            elif rr == 1:
+                self.midx = (self.midx + i) & 0xffff
+            elif rr == 2:
+                self.psp += i
+            return None
+        if grp == 3 and not w & 0x800:
+            return self.call(rel, next_ip)
+        if grp == 3:
+            op = (w >> 6) & 31
+            if op == MISC_RET_N:
+                return self.ret(w & 63)
+            if op == MISC_RET_VAR:
+                return self.ret(None)
+            if op == MISC_CALL_ABS:
+                return self.call(words[1], next_ip)
+            if op == MISC_JMP_ABS:
+                return words[1]
+            if op == MISC_CALL_POP:
+                target = self.item(0)
+                self.psp += 2
+                return self.call(target, next_ip)
+        return None
+
+    def run(self, code, pc, stop):
+        """Execute from pc until the IP reaches stop (the return address)."""
+        for _ in range(100000):
+            if pc == stop:
+                return
+            n = self.length(code[pc >> 1])
+            nxt = pc + 2 * n
+            target = self.step(code[pc >> 1:(pc >> 1) + n], nxt)
+            pc = nxt if target is None else target
+        raise AssertionError('reference run does not finish')
 
     def alu(self, op, dd, b, s):
         bits = 8 if s else 16
@@ -241,6 +336,13 @@ class Program:
         self.words = []
         self.ref = Ref()
         self.depth = 0
+        # while False the instructions are only collected (a function body
+        # is executed later, from a call)
+        self.live = True
+        self.max_depth = MAX_DEPTH
+        # inside a function: (argument words above the link, variadic)
+        self.frame = None
+        self.funcs = []
 
     @property
     def addr(self):
@@ -248,9 +350,18 @@ class Program:
 
     def emit(self, ins, delta=0):
         self.words += ins
-        self.ref.step(ins, self.addr)
         self.depth += delta
-        assert self.depth == (PSP0 - self.ref.psp) // 2, (self.depth, self.ref.psp)
+        if self.live:
+            self.ref.step(ins, self.addr)
+            assert self.depth == (PSP0 - self.ref.psp) // 2, (self.depth, self.ref.psp)
+
+    def emit_call(self, ins, delta):
+        self.words += ins
+        self.depth += delta
+        if self.live:
+            target = self.ref.step(ins, self.addr)
+            self.ref.run(self.words, target, self.addr)
+            assert self.depth == (PSP0 - self.ref.psp) // 2, (self.depth, self.ref.psp)
 
     def push_imm8(self, v):
         self.emit(i_imm8(OP_LD, 2, v), 1)
@@ -267,6 +378,8 @@ class Program:
         self.pop_to_reg(REG_MBP)
         self.push_imm8(r.choice([0, 0, 2, 4, 1, 3]))
         self.pop_to_reg(REG_MIDX)
+        if r.random() < 0.3:
+            self.emit(i_addp(r.randrange(2), r.choice([-8, -4, -2, 2, 4, 8])))
 
     # dd choices that keep 0 <= depth <= MAX_DEPTH. LD takes (dd, depth change).
     def ld_dds(self):
@@ -276,9 +389,9 @@ class Program:
             out.append(0)
         if d >= 2:
             out.append(1)
-        if d < MAX_DEPTH:
+        if d < self.max_depth:
             out.append(2)
-        if 1 <= d < MAX_DEPTH:
+        if 1 <= d < self.max_depth:
             out.append(3)
         return out
 
@@ -311,7 +424,7 @@ class Program:
         if kind == 'imm16':
             return i_gen(op, dd, s, 4, 0, r.getrandbits(16))
         if kind == 'pfp':
-            return i_pfp(op, dd, s, r.randrange(-min(d, 64), 64))
+            return i_pfp(op, dd, s, r.randrange(-min(d, 64), 64 if self.frame is None else self.frame[0] + 1))
         if kind == 'ptr':
             return i_gen(op, dd, s, r.choice([1, 2, 3]), s and r.getrandbits(1))
         if kind == 'abs':
@@ -348,6 +461,16 @@ class Program:
         self.emit(ins, -1 if dd >= 2 else 0)
         return True
 
+    def pfp_store(self, d):
+        """A word offset for a store relative to PFP, or None. In a function it must not
+        hit the saved PFP or the count: only the stack items below PFP and the arguments."""
+        r = self.rng
+        if self.frame is None:
+            return r.randrange(-min(d, 64), 64)
+        words, variadic = self.frame
+        cands = list(range(-min(d, 64), 0)) + list(range(2 if variadic else 1, words + 1))
+        return r.choice(cands) if cands else None
+
     def st_one(self):
         r = self.rng
         dds = self.st_dds()
@@ -362,6 +485,8 @@ class Program:
         if d >= 2:
             kinds.append('nos')
         kind = r.choice(kinds)
+        if kind == 'pfp' and self.pfp_store(d) is None:
+            kind = 'null'
         if kind == 'null':
             ins = i_gen(OP_ST, dd, s, 0, REG_NULL)
         elif kind == 'tos':
@@ -369,7 +494,7 @@ class Program:
         elif kind == 'nos':
             ins = i_gen(OP_ST, dd, s, 0, REG_NOS)
         elif kind == 'pfp':
-            ins = i_pfp(OP_ST, dd, s, r.randrange(-min(d, 64), 64))
+            ins = i_pfp(OP_ST, dd, s, self.pfp_store(d))
         elif kind == 'ptr':
             ins = i_gen(OP_ST, dd, s, r.choice([1, 2, 3]), 0)
         elif kind == 'abs':
@@ -388,7 +513,7 @@ class Program:
         """Pointer into the live stack: PSP -> MBP, MIDX = 2j, one access."""
         r = self.rng
         d = self.depth
-        if d < 3 or d > MAX_DEPTH - 3:
+        if d < 3 or d > self.max_depth - 3:
             return False
         self.emit(i_gen(OP_LD, 2, 0, 0, REG_SP), 1)
         self.pop_to_reg(REG_MBP)
@@ -416,26 +541,105 @@ class Program:
         self.set_far()
         return True
 
+    def block_skip(self):
+        """BRA or JMP over a few junk words that must never be fetched."""
+        r = self.rng
+        k = r.randrange(1, 5)
+        if r.random() < 0.5:
+            self.emit_plain(i_bra(k))
+        else:
+            self.emit_plain(i_misc(MISC_JMP_ABS, extra=self.addr + 4 + 2 * k))
+        self.words += [r.getrandbits(16) for _ in range(k)]
+
+    def emit_plain(self, ins):
+        """Instructions the reference does not execute here: the jump skips the junk."""
+        self.words += ins
+
+    def call_func(self, func):
+        r = self.rng
+        addr, nargs, variadic, words = func
+        for _ in range(nargs):
+            self.push_imm8(r.getrandbits(8))
+        if variadic:
+            self.push_imm8(words)       # the count counts itself
+        form = r.choice(['rel', 'abs', 'pop'])
+        rel = (addr - (self.addr + 2)) // 2
+        if form == 'rel' and not -1024 <= rel < 1024:
+            form = 'abs'
+        if form == 'rel':
+            self.emit_call(i_call_rel(rel), -words)
+        elif form == 'abs':
+            self.emit_call(i_misc(MISC_CALL_ABS, extra=addr), -words)
+        else:
+            self.push_imm16(addr)
+            self.emit_call(i_misc(MISC_CALL_POP), -words - 1)
+
+    def make_func(self):
+        r = self.rng
+        nargs = r.randint(0, 3)
+        variadic = r.random() < 0.4
+        if r.random() < 0.1:
+            # many arguments: exercises the whole width of RET #n
+            nargs, variadic = r.randint(30, 40), False
+        words = nargs + 1 if variadic else nargs
+        n_locals = r.randint(0, 4)
+        addr = self.addr
+        saved = (self.live, self.depth, self.max_depth, self.frame)
+        self.live, self.depth, self.max_depth = False, 0, 12
+        self.frame = (words, variadic)
+        if n_locals:
+            # the locals are the top stack items: reserve them, then give each a value
+            self.emit(i_addp(2, -2 * n_locals), n_locals)
+            for k in range(n_locals):
+                self.push_imm8(r.getrandbits(8))
+                self.emit(i_pfp(OP_ST, 2, 0, k - n_locals), -1)
+        for _ in range(r.randint(2, 20)):
+            self.random_op(allow_calls=True)
+        self.set_far()
+        if variadic:
+            self.emit(i_misc(MISC_RET_VAR))
+        else:
+            self.emit(i_misc(MISC_RET_N, nargs))
+        self.live, self.depth, self.max_depth, self.frame = saved
+        self.funcs.append((addr, nargs, variadic, words))
+
+    def random_op(self, allow_calls):
+        r = self.rng
+        x = r.random()
+        if x < 0.04:
+            self.block_set_sp()
+        elif x < 0.14:
+            self.block_alias()
+        elif x < 0.34:
+            while not self.ld_one():
+                pass
+        elif x < 0.50:
+            while not self.alu_one():
+                self.ld_one()
+        elif x < 0.58 and allow_calls and self.funcs and self.depth + 6 <= self.max_depth:
+            func = r.choice(self.funcs)
+            if func[3] <= 8 or (self.frame is None and self.depth <= 4):
+                self.call_func(func)
+        elif x < 0.62:
+            self.block_skip()
+        else:
+            while not self.st_one():
+                self.ld_one()
+
     def build(self, n):
         r = self.rng
+        # code layout: JMP main, the functions, then main
+        self.live = False
+        self.words = [0, 0]
+        for _ in range(r.randint(0, 4)):
+            self.make_func()
+        self.words[0:2] = i_misc(MISC_JMP_ABS, extra=self.addr)
+        self.live = True
         self.set_far()
         while self.depth < 4:
             self.push_imm8(r.getrandbits(8))
         for _ in range(n):
-            x = r.random()
-            if x < 0.05:
-                self.block_set_sp()
-            elif x < 0.17:
-                self.block_alias()
-            elif x < 0.40:
-                while not self.ld_one():
-                    pass
-            elif x < 0.58:
-                while not self.alu_one():
-                    self.ld_one()
-            else:
-                while not self.st_one():
-                    self.ld_one()
+            self.random_op(allow_calls=True)
         # epilogue: dump MBP, MIDX and the whole stack to OUT...
         self.emit(i_gen(OP_LD, 2, 0, 0, REG_MBP), 1)
         self.emit(i_gen(OP_LD, 2, 0, 0, REG_MIDX), 1)

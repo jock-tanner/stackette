@@ -1,5 +1,6 @@
 """
-Randomized test for cpu.py: LD, ST and the ALU instructions in all their formats.
+Randomized test for cpu.py: LD, ST, the ALU and the control flow instructions (calls, returns,
+jumps, ADDP).
 
 A random program (cpu_ldst_model.Program) is put into code memory at address 0
 and the CPU runs it. Both of the CPU's memory ports (code/data `mem`, and the
@@ -80,6 +81,8 @@ def run_case(seed, n_instr=150):
             await ctx.tick()
         flags = ctx.get(dut.sw) & 0x1f
         assert flags == prog.ref.flags, f'seed {seed}: flags {flags:05b}, expected {prog.ref.flags:05b}'
+        assert (ctx.get(dut.sfp), ctx.get(dut.rsp)) == (prog.ref.sfp, prog.ref.rsp), (
+            f'seed {seed}: SFP and RSP are {ctx.get(dut.sfp):#06x}, {ctx.get(dut.rsp):#06x}')
         for lo, hi in compare_ranges(prog):
             for a in range(lo, hi):
                 got = store.get(a, junk(2 * a))

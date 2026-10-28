@@ -1,7 +1,7 @@
 from amaranth import *
 from amaranth.lib.wiring import Component, Out, connect, flipped
 
-from alu import ALU
+from alu import ALU, OpCodes
 from memory_port import MemoryPort
 from memory_select import CPU_ADDR_WIDTH, Space
 from stack_cache import Maint, Shift, StackCache
@@ -40,6 +40,11 @@ REG_MIDX = 3
 REG_SP = 4
 REG_NULL = 5
 REG_IP = 15
+MISC_RET_N = 1
+MISC_CALL_ABS = 5
+MISC_JMP_ABS = 6
+MISC_CALL_POP = 7
+MISC_RET_VAR = 9
 
 
 class CPU(Component):
@@ -77,6 +82,8 @@ class CPU(Component):
         sw = Signal(16)
         # visible to testbenches
         self.sw = sw
+        self.sfp = sfp
+        self.rsp = rsp
 
         # internal registers
         instr = Signal(16)  # the instruction word being executed
@@ -84,6 +91,7 @@ class CPU(Component):
                             # (immediate value or absolute address)
         val = Signal(16)    # the operand in transit
         lane = Signal()     # address bit 0 of a byte load
+        link = Signal(16)   # the caller's frame pointer, read by RET
 
         m.d.comb += self.space.eq(Space.CODE)
 
@@ -105,9 +113,24 @@ class CPU(Component):
         is_ld = (op == OP_LD) & (fmt != 3)
         is_st = (op == OP_ST) & (fmt != 3) & (fmt != FMT_IMM8)
         is_alu = (op < OP_LD) & (fmt != 3)
-
         # AND OR XOR BIC; only looked at for ALU ops, so one bit is enough
         is_logic = op[2]
+        # control format 11: BRA, CALL rel11, ADDP, and the misc group
+        is_ctl = fmt == 3
+        grp = instr[12:14]
+        misc_op = instr[6:11]
+        is_bra = is_ctl & (grp == 0) & ~instr[11]
+        is_addp = is_ctl & (grp == 1) & (instr[10:12] == 1) & (instr[8:10] != 3)
+        is_call_rel = is_ctl & (grp == 3) & ~instr[11]
+        is_misc = is_ctl & (grp == 3) & instr[11]
+        # RET #n drops n argument words; RET takes the count from the frame
+        is_ret_n = is_misc & (misc_op == MISC_RET_N)
+        is_ret_var = is_misc & (misc_op == MISC_RET_VAR)
+        is_ret = is_ret_n | is_ret_var
+        is_call_abs = is_misc & (misc_op == MISC_CALL_ABS)
+        is_jmp_abs = is_misc & (misc_op == MISC_JMP_ABS)
+        is_call_pop = is_misc & (misc_op == MISC_CALL_POP)
+        is_call_direct = is_call_rel | is_call_abs
         reg_mode = is_gen & (mode == MODE_REG)
         ptr_mode = is_gen & (
                 (mode == MODE_PTR)
@@ -119,12 +142,16 @@ class CPU(Component):
         sp_mode = is_gen & (mode == MODE_SP)
         sp_stack = sp_mode & (x < 4)
         sp_mem = sp_mode & (x >= 4)
-        needs_extra = imm16_mode | abs_mode
+        needs_extra = imm16_mode | abs_mode | is_call_abs | is_jmp_abs
         mem_operand = is_pfp | ptr_mode | abs_mode | sp_mem
         ok_ld = is_ld & ~(is_gen & (mode == 7))
         ok_st = is_st & ~(is_gen & ((mode == MODE_IMM16) | (mode == 7)))
         ok_alu = is_alu & ~(is_gen & (mode == 7))
-        ok = ok_ld | ok_st | ok_alu
+        ok_ctl = (
+                is_bra | is_addp | is_call_rel | is_ret
+                | is_call_abs | is_jmp_abs | is_call_pop
+        )
+        ok = ok_ld | ok_st | ok_alu | ok_ctl
 
         size = Signal(2)  # value to step midx
         m.d.comb += size.eq(Mux(s, 1, 2))
@@ -261,6 +288,28 @@ class CPU(Component):
             st_need.eq(need_of(st_pos)),
         ]
 
+        # ---- control flow ----
+        # BRA and CALL rel11: signed offset in words from the next instruction
+        rel_off = Signal(signed(12))
+        m.d.comb += rel_off.eq(Cat(C(0, 1), instr[0:11]))
+        addp_i = Signal(signed(8))
+        m.d.comb += addp_i.eq(instr[0:8])
+
+        # the branch or call target
+        tgt = Signal(16)
+        with m.If(is_bra | is_call_rel):
+            m.d.comb += tgt.eq(ip + rel_off)
+        with m.Elif(is_call_abs | is_jmp_abs):
+            m.d.comb += tgt.eq(extra)
+        with m.Else():
+            m.d.comb += tgt.eq(val)
+
+        def rstack_space():
+            m.d.comb += self.space.eq(Space.RSTACK)
+
+        def pstack_space():
+            m.d.comb += self.space.eq(Space.PSTACK)
+
         # ---- ALU ----
         # ADD ADC SUB SBC AND OR XOR BIC take their source like LD. `dd` picks
         # the other operand and what happens to the stack: 00 TOS op= src,
@@ -363,6 +412,25 @@ class CPU(Component):
                         m.next = 'LD_DELIVER'
                 with m.Elif(is_st):
                     m.next = 'ST_POP'
+                with m.Elif(is_bra | is_jmp_abs):
+                    m.d.sync += ip.eq(tgt)
+                    m.next = after
+                with m.Elif(is_addp):
+                    with m.Switch(instr[8:10]):
+                        with m.Case(0):
+                            m.d.sync += mbp.eq(mbp + addp_i)
+                            m.next = after
+                        with m.Case(1):
+                            m.d.sync += midx.eq(midx + addp_i)
+                            m.next = after
+                        with m.Case(2):
+                            m.next = 'ADDP_SP'
+                with m.Elif(is_call_pop):
+                    m.next = 'CALL_POP'
+                with m.Elif(is_call_direct):
+                    m.next = 'CALL_RA'
+                with m.Elif(is_ret):
+                    m.next = 'RET_FLUSH'
                 with m.Else():
                     m.next = after
 
@@ -473,6 +541,144 @@ class CPU(Component):
                             sw[0].eq(alu.carry),
                             sw[3].eq(alu.overflow),
                         ]
+                    m.next = after
+
+            # ---- ADDP SP: the same as storing to SP ----
+            with m.State('ADDP_SP'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.maint.eq(Maint.SET_PSP),
+                    cmd.arg.eq(stack.psp + addp_i),
+                ]
+                with m.If(cmd.ready):
+                    m.next = after
+
+            # ---- CALL ----
+            # The return address goes on the return stack, the caller's SFP
+            # becomes the first word of the new frame on the parameter stack,
+            # and SFP points at it: [sfp] is the saved SFP, [sfp+2] the
+            # argument count the caller pushed (it counts itself).
+            # CALL pop takes its target off the stack first.
+            with m.State('CALL_POP'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.need.eq(0b0001),
+                    cmd.shift.eq(Shift.POP),
+                ]
+                with m.If(cmd.ready):
+                    m.d.sync += val.eq(stack.d0)
+                    m.next = 'CALL_RA'
+
+            with m.State('CALL_RA'):
+                rstack_space()
+                m.d.comb += [
+                    req.valid.eq(1),
+                    req.we.eq(1),
+                    req.byte_hi.eq(1),
+                    req.byte_lo.eq(1),
+                    req.addr.eq((rsp - 2)[1:]),
+                    req.wdata.eq(ip),
+                ]
+                with m.If(req.ready):
+                    m.d.sync += rsp.eq(rsp - 2)
+                    m.next = 'CALL_LINK'
+
+            with m.State('CALL_LINK'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.shift.eq(Shift.PUSH),
+                    cmd.arg.eq(sfp),
+                ]
+                with m.If(cmd.ready):
+                    m.d.sync += [
+                        sfp.eq(stack.psp - 2),
+                        ip.eq(tgt),
+                    ]
+                    m.next = after
+
+            # ---- RET ----
+            # Reads the saved SFP (and for the variadic RET the count) from the
+            # frame in memory, so the cache is flushed first. It drops the
+            # frame and the arguments by moving PSP to sfp + 2 + 2 * count,
+            # restores SFP and takes the return address off the return stack.
+            # RET #n has no count word in the frame: count = n, from the
+            # instruction.
+            with m.State('RET_FLUSH'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.maint.eq(Maint.FLUSH),
+                ]
+                with m.If(cmd.ready):
+                    m.next = 'RET_IDLE'
+
+            with m.State('RET_IDLE'):
+                with m.If(stack.idle):
+                    with m.If(is_ret_n):
+                        m.d.sync += val.eq(instr[0:6])
+                        m.next = 'RET_LNK_RD'
+                    with m.Else():
+                        m.next = 'RET_CNT_RD'
+
+            with m.State('RET_CNT_RD'):
+                pstack_space()
+                m.d.comb += [
+                    req.valid.eq(1),
+                    req.we.eq(0),
+                    req.byte_hi.eq(1),
+                    req.byte_lo.eq(1),
+                    req.addr.eq((sfp + 2)[1:]),
+                ]
+                with m.If(req.ready):
+                    m.next = 'RET_CNT_WAIT'
+
+            with m.State('RET_CNT_WAIT'):
+                with m.If(resp.valid):
+                    m.d.sync += val.eq(resp.data)
+                    m.next = 'RET_LNK_RD'
+
+            with m.State('RET_LNK_RD'):
+                pstack_space()
+                m.d.comb += [
+                    req.valid.eq(1),
+                    req.we.eq(0),
+                    req.byte_hi.eq(1),
+                    req.byte_lo.eq(1),
+                    req.addr.eq(sfp[1:]),
+                ]
+                with m.If(req.ready):
+                    m.next = 'RET_LNK_WAIT'
+
+            with m.State('RET_LNK_WAIT'):
+                with m.If(resp.valid):
+                    m.d.sync += link.eq(resp.data)
+                    m.next = 'RET_SP'
+
+            with m.State('RET_SP'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.maint.eq(Maint.SET_PSP),
+                    cmd.arg.eq(sfp + 2 + Cat(C(0, 1), val)),
+                ]
+                with m.If(cmd.ready):
+                    m.d.sync += sfp.eq(link)
+                    m.next = 'RET_IP_RD'
+
+            with m.State('RET_IP_RD'):
+                rstack_space()
+                m.d.comb += [
+                    req.valid.eq(1),
+                    req.we.eq(0),
+                    req.byte_hi.eq(1),
+                    req.byte_lo.eq(1),
+                    req.addr.eq(rsp[1:]),
+                ]
+                with m.If(req.ready):
+                    m.d.sync += rsp.eq(rsp + 2)
+                    m.next = 'RET_IP_WAIT'
+
+            with m.State('RET_IP_WAIT'):
+                with m.If(resp.valid):
+                    m.d.sync += ip.eq(resp.data)
                     m.next = after
 
             # ---- ST: take the value off the stack ----

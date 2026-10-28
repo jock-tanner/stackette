@@ -3,7 +3,7 @@ SDRAM tester, split into a platform-independent initiator (MemoryTester) and
 a thin DE0-Nano top level. The same initiator works against the SDRAM
 subsystem, a cache in front of it, or a simulated memory.
 """
-from amaranth import Module, Signal, Elaboratable
+from amaranth import Cat, Const, Module, Signal, Elaboratable
 from amaranth.lib.wiring import Component, Out, connect
 
 from memory_port import MemoryPort
@@ -12,7 +12,10 @@ from sdram_controller import HOST_ADDR_WIDTH
 
 class MemoryTester(Component):
     """
-    Writes a pattern to every word, reads it back, flags mismatches.
+    Writes a pattern to every word, reads it back, flags mismatches. The word
+    stored at an address is the pattern XOR the address folded to 16 bits, so a
+    read that returns stale data or the data of another address is caught (a
+    constant pattern could not tell).
 
     Uses full-word accesses only (both byte enables set). Each request is
     held until accepted, so the tester needs no startup delay of its own:
@@ -38,6 +41,11 @@ class MemoryTester(Component):
         addr = Signal(max(self.word_count - 1, 1).bit_length())
         last = addr == self.word_count - 1
 
+        # what the word at `addr` holds
+        addr24 = Cat(addr, Const(0, 24))[:24]
+        expect = Signal(16)
+        m.d.comb += expect.eq(addr24[0:16] ^ addr24[8:24] ^ self.pattern)
+
         m.d.comb += [
             req.byte_hi.eq(1),     # high byte enabled
             req.byte_lo.eq(1),     # low byte enabled
@@ -50,7 +58,7 @@ class MemoryTester(Component):
                     req.valid.eq(1),
                     req.we.eq(1),
                     req.addr.eq(addr),
-                    req.wdata.eq(self.pattern),
+                    req.wdata.eq(expect),
                     self.write_wait.eq(~req.ready),
                 ]
                 with m.If(req.ready):
@@ -72,7 +80,7 @@ class MemoryTester(Component):
             with m.State('READ_WAIT'):
                 m.d.comb += self.read_wait.eq(~resp.valid)
                 with m.If(resp.valid):
-                    with m.If(resp.data != self.pattern):
+                    with m.If(resp.data != expect):
                         m.d.sync += self.mismatch.eq(1)
                     with m.If(last):
                         m.next = 'DONE'
@@ -88,15 +96,16 @@ class MemoryTester(Component):
 
 class DE0NanoTop(Elaboratable):
     """Board top level: tester + SDRAM subsystem + LEDs."""
-    def __init__(self, **tester_kwargs):
+    def __init__(self, *, read_delay=1, **tester_kwargs):
         super().__init__()
+        self.read_delay = read_delay
         self.tester_kwargs = tester_kwargs
 
     def elaborate(self, platform):
         from de0nano_sdram import DE0NanoSDRAM
 
         m = Module()
-        m.submodules.memory = memory = DE0NanoSDRAM()
+        m.submodules.memory = memory = DE0NanoSDRAM(read_delay=self.read_delay)
         m.submodules.tester = tester = MemoryTester(**self.tester_kwargs)
 
         # The one line to change when a cache goes in between:
@@ -114,4 +123,4 @@ class DE0NanoTop(Elaboratable):
 if __name__ == '__main__':
     from amaranth_boards.de0nano import DE0NanoPlatform
 
-    DE0NanoPlatform().build(DE0NanoTop(), do_program=True)
+    DE0NanoPlatform().build(DE0NanoTop(read_delay=0), do_program=True)

@@ -57,14 +57,16 @@ class DE0NanoSDRAM(wiring.Component):
 
     reset_cycles: how long the controller is held in reset after the PLL
     locks (the SDRAM needs time after power-up before initialization).
+    read_delay: see SDRAMController.
     Until the controller's init sequence finishes, bus.req.ready stays low,
     so users just keep valid asserted and need no startup state of their own.
     """
     bus: In(MemoryPort(HOST_ADDR_WIDTH))
 
-    def __init__(self, *, reset_cycles=1024):
+    def __init__(self, *, reset_cycles=1024, read_delay=1):
         super().__init__()
         self.reset_cycles = reset_cycles
+        self.read_delay = read_delay
 
     def elaborate(self, platform):
         m = Module()
@@ -89,7 +91,7 @@ class DE0NanoSDRAM(wiring.Component):
             ResetSignal('sdram_ctl').eq(~pll.locked | (hold != 0)),
         ]
 
-        controller = SDRAMController()
+        controller = SDRAMController(read_delay=self.read_delay)
         m.submodules.controller = DomainRenamer({'sync': 'sdram_ctl'})(controller)
         m.submodules.phy = phy = DE0NanoSDRAMPhy(clk=pll.clk_sdram)
 

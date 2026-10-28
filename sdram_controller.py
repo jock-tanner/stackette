@@ -18,6 +18,15 @@ handshake on `bus.req`:
   * we = 1 writes wdata (16 bits) to addr; the write reaches the SDRAM a few
     clocks later. No response is generated for writes.
 
+  * byte_hi / byte_lo select which bytes of the word take part. They drive
+    the SDRAM's UDQM / LDQM masks (inverted: enabled = unmasked), so a write
+    stores only the enabled bytes, and on a read the disabled lane of
+    resp.data is undefined. Like addr and wdata they are latched on accept,
+    so the initiator may drop the whole request right after it. (The masks
+    must stay active until the data cycle, a few clocks after the accept:
+    with unlatched masks an initiator that drops its request would block the
+    write, or leave the data bus floating on a read.)
+
   * we = 0 reads 16 bits from addr; the result appears on `bus.resp`
     a few clocks later, when resp.valid pulses.
 
@@ -74,6 +83,7 @@ class State(IntEnum):
     READ_CAS = 0b10010
     READ_NOP2 = 0b10011
     READ_READ = 0b10100
+    READ_WAIT = 0b10101
 
     WRIT_ACT = 0b11000
     WRIT_NOP1 = 0b11001
@@ -120,8 +130,15 @@ class SDRAMController(Component):
     bus: In(MemoryPort(HOST_ADDR_WIDTH))
     sdram: Out(SDRAMPins())
 
-    def __init__(self):
+    def __init__(self, *, read_delay=1):
+        """
+        read_delay: extra clocks to wait before the read data is captured
+        (resp.valid comes that much later). The data is captured in the
+        READ_READ state; with CAS latency 3 and a phase-shifted SDRAM clock
+        it may not be valid yet there. 0 is the original timing.
+        """
         super().__init__()
+        self.read_delay = read_delay
         self.cycles_between_refresh = (
             (CLOCK_FREQ * 1_000 * REFRESH_TIME) // REFRESH_COUNT
         )
@@ -145,10 +162,9 @@ class SDRAMController(Component):
 
         # Registers. Their reset values (applied by the domain reset) put the
         # controller at the start of the initialization sequence.
-        host_addr_r = Signal(HOST_ADDR_WIDTH)
-        byte_lo_r = Signal()
-        byte_hi_r = Signal()
+        haddr_r = Signal(HOST_ADDR_WIDTH)
         wr_data_r = Signal(16)
+        dqm_r = Signal(2)
         state_cnt = Signal(4, init=0xf)
         refresh_cnt = Signal(10)
         command = Signal(8, init=Command.NOP)
@@ -197,8 +213,10 @@ class SDRAMController(Component):
             sdram.dq_oe.eq(state == State.WRIT_CAS),
         ]
 
-        # Data masks: 0 while reading/writing, 1 otherwise
-        m.d.comb += sdram.dqm.eq(Mux(state[4], Cat([~byte_lo_r, ~byte_hi_r]), 0b11))
+        # DQM masks (active low on the chip): follow the latched byte
+        # enables while reading/writing, mask both lanes otherwise.
+        # Cat order: bit 0 = LDQM (byte_lo), bit 1 = UDQM (byte_hi).
+        m.d.comb += sdram.dqm.eq(Mux(state[4], dqm_r, 0b11))
 
         # Registered state, command and counters
         m.d.sync += [
@@ -214,10 +232,9 @@ class SDRAMController(Component):
         # Latch the request when it is accepted
         with m.If(accept):
             m.d.sync += [
-                host_addr_r.eq(host.addr),
+                haddr_r.eq(host.addr),
                 wr_data_r.eq(host.wdata),
-                byte_hi_r.eq(host.byte_hi),
-                byte_lo_r.eq(host.byte_lo),
+                dqm_r.eq(Cat([~host.byte_lo, ~host.byte_hi])),
             ]
 
         # Read response
@@ -237,9 +254,9 @@ class SDRAMController(Component):
 
         # Address generation for the SDRAM, based on the current state
         # Host address layout: | bank | row | column |
-        bank_bits = host_addr_r[col_width + row_width:]
-        row_bits  = host_addr_r[col_width:col_width + row_width]
-        col_bits  = host_addr_r[:col_width]
+        bank_bits = haddr_r[col_width + row_width:]
+        row_bits  = haddr_r[col_width:col_width + row_width]
+        col_bits  = haddr_r[:col_width]
 
         with m.If((state == State.READ_ACT) | (state == State.WRIT_ACT)):
             m.d.comb += [
@@ -362,6 +379,15 @@ class SDRAMController(Component):
                 with m.Case(State.READ_CAS):
                     m.d.comb += state_next.eq(State.READ_NOP2)
                 with m.Case(State.READ_NOP2):
+                    if self.read_delay:
+                        # READ_WAIT lasts read_delay clocks
+                        m.d.comb += [
+                            state_next.eq(State.READ_WAIT),
+                            state_cnt_next.eq(self.read_delay - 1),
+                        ]
+                    else:
+                        m.d.comb += state_next.eq(State.READ_READ)
+                with m.Case(State.READ_WAIT):
                     m.d.comb += state_next.eq(State.READ_READ)
                 # READ_READ: default -> IDLE
 
