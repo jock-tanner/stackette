@@ -23,7 +23,8 @@ MAX_DEPTH = 40
 OP_ADD, OP_ADC, OP_SUB, OP_SBC, OP_AND, OP_OR, OP_XOR, OP_BIC = range(8)
 OP_LD = 8
 OP_ST = 9
-REG_TOS, REG_NOS, REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_IP = 0, 1, 2, 3, 4, 5, 15
+REG_TOS, REG_NOS, REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_SR, REG_IP = 0, 1, 2, 3, 4, 5, 6, 15
+SR_MASK = 0x1f
 
 
 def junk(byte_addr):
@@ -67,6 +68,14 @@ def i_skip(cc):
     return [0xc800 | (cc << 6)]
 
 
+def i_setb(i):
+    return [0xd000 | (i & 0xff)]
+
+
+def i_clrb(i):
+    return [0xd100 | (i & 0xff)]
+
+
 def i_addp(rr, i):
     return [0xd400 | (rr << 8) | (i & 0xff)]
 
@@ -91,6 +100,9 @@ class Ref:
     @property
     def flags(self):
         return self.c | self.z << 1 | self.n << 2 | self.v << 3 | self.p << 4
+
+    def set_flags(self, v):
+        self.c, self.z, self.n, self.v, self.p = (v >> k & 1 for k in range(5))
 
     def rd16(self, a):
         a &= 0xfffe
@@ -203,6 +215,10 @@ class Ref:
         rel = (next_ip + 2 * sext(w & 0x7ff, 11)) & 0xffff
         if grp == 0 and not w & 0x800:
             return rel
+        if grp == 1 and (w >> 10) & 3 == 0 and not (w >> 9) & 1:
+            i = w & SR_MASK
+            self.set_flags(self.flags & ~i if (w >> 8) & 1 else self.flags | i)
+            return None
         if grp == 1 and (w >> 10) & 3 == 1:
             rr, i = (w >> 8) & 3, sext(w & 0xff, 8)
             if rr == 0:
@@ -292,7 +308,7 @@ class Ref:
         x = w & 15
         if mode == 0:
             regs = {REG_TOS: self.item(0), REG_NOS: self.item(1), REG_MBP: self.mbp,
-                    REG_MIDX: self.midx, REG_SP: self.psp, REG_NULL: 0, REG_IP: next_ip}
+                    REG_MIDX: self.midx, REG_SP: self.psp, REG_NULL: 0, REG_SR: self.flags, REG_IP: next_ip}
             return regs[x] & (0xff if s else 0xffff)
         if mode in (1, 2, 3):
             ea = self.ea_ptr(mode, s)
@@ -340,6 +356,8 @@ class Ref:
                 self.midx = v8
             elif x == REG_SP:
                 self.psp = v8
+            elif x == REG_SR:
+                self.set_flags(v8)
         elif mode in (1, 2, 3):
             ea = self.ea_ptr(mode, s)
             self.wr(ea, s, v)
@@ -437,7 +455,7 @@ class Program:
         if kind == 'imm8':
             return i_imm8(op, dd, r.getrandbits(8))
         if kind == 'reg':
-            regs = [REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_IP]
+            regs = [REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_SR, REG_IP]
             if d >= 1:
                 regs.append(REG_TOS)
             if d >= 2:
@@ -501,7 +519,7 @@ class Program:
         dd = r.choice(dds)
         d = self.depth - (1 if dd >= 2 else 0)     # depth when the destination is evaluated
         s = r.getrandbits(1)
-        kinds = ['pfp', 'ptr', 'abs', 'null']
+        kinds = ['pfp', 'ptr', 'abs', 'null', 'sr']
         if d >= 1:
             kinds += ['tos', 'sp']
         if d >= 2:
@@ -511,6 +529,8 @@ class Program:
             kind = 'null'
         if kind == 'null':
             ins = i_gen(OP_ST, dd, s, 0, REG_NULL)
+        elif kind == 'sr':
+            ins = i_gen(OP_ST, dd, s, 0, REG_SR)
         elif kind == 'tos':
             ins = i_gen(OP_ST, dd, s, 0, REG_TOS)
         elif kind == 'nos':
@@ -669,6 +689,8 @@ class Program:
             self.block_skip()
         elif x < 0.70:
             self.block_skip_cc()
+        elif x < 0.74:
+            self.emit(r.choice([i_setb, i_clrb])(r.getrandbits(8)))
         else:
             while not self.st_one():
                 self.ld_one()

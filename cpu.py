@@ -39,7 +39,11 @@ REG_MBP = 2
 REG_MIDX = 3
 REG_SP = 4
 REG_NULL = 5
+REG_SR = 6
 REG_IP = 15
+# the status register bits that exist: C Z N V P. The others read as zero
+# and ignore writes.
+SR_MASK = 0b11111
 MISC_RET_N = 1
 MISC_CALL_ABS = 5
 MISC_JMP_ABS = 6
@@ -123,6 +127,8 @@ class CPU(Component):
         misc_op = instr[6:11]
         is_bra = is_ctl & (grp == 0) & ~instr[11]
         is_skip = is_ctl & (grp == 0) & instr[11] & ~instr[10]
+        # SETB and CLRB: 11 01 00 0o iiiiiiii
+        is_setclr = is_ctl & (grp == 1) & (instr[10:12] == 0) & ~instr[9]
         is_addp = is_ctl & (grp == 1) & (instr[10:12] == 1) & (instr[8:10] != 3)
         is_call_rel = is_ctl & (grp == 3) & ~instr[11]
         is_misc = is_ctl & (grp == 3) & instr[11]
@@ -151,7 +157,7 @@ class CPU(Component):
         ok_st = is_st & ~(is_gen & ((mode == MODE_IMM16) | (mode == 7)))
         ok_alu = is_alu & ~(is_gen & (mode == 7))
         ok_ctl = (
-                is_bra | is_skip | is_addp | is_call_rel | is_ret
+                is_bra | is_skip | is_setclr | is_addp | is_call_rel | is_ret
                 | is_call_abs | is_jmp_abs | is_call_pop
         )
         ok = ok_ld | ok_st | ok_alu | ok_ctl
@@ -217,6 +223,8 @@ class CPU(Component):
                 m.d.comb += reg_val.eq(midx)
             with m.Case(REG_SP):
                 m.d.comb += reg_val.eq(stack.psp)
+            with m.Case(REG_SR):
+                m.d.comb += reg_val.eq(sw & SR_MASK)
             with m.Case(REG_IP):
                 m.d.comb += reg_val.eq(ip)
 
@@ -456,6 +464,12 @@ class CPU(Component):
                     m.next = after
                 with m.Elif(is_skip):
                     m.d.sync += skipping.eq(cond)
+                    m.next = after
+                with m.Elif(is_setclr):
+                    with m.If(instr[8]):
+                        m.d.sync += sw.eq(sw & ~(instr[0:8] & SR_MASK))
+                    with m.Else():
+                        m.d.sync += sw.eq(sw | (instr[0:8] & SR_MASK))
                     m.next = after
                 with m.Elif(is_addp):
                     with m.Switch(instr[8:10]):
@@ -752,6 +766,9 @@ class CPU(Component):
                             m.next = after
                         with m.Case(REG_SP):
                             m.next = 'ST_SP'
+                        with m.Case(REG_SR):
+                            m.d.sync += sw.eq(val_sz & SR_MASK)
+                            m.next = after
                         with m.Case(REG_IP):
                             m.d.sync += ip.eq(val_sz)
                             m.next = after
