@@ -4,9 +4,12 @@ Randomized test for memory_select.py and memory_select_pipelined.py.
 Three fake targets with different latencies and random `ready` sit behind the
 selector. A random initiator drives it. Checked:
 
-  * every request reaches exactly the target the memory map names, with the
-    address cut/extended as documented and we / byte enables / wdata intact
-    (each target logs what it saw; compared with what was expected),
+  * every request reaches exactly the target the memory map names (by physical
+    page, see memory_select.py), with the address cut as documented and
+    we / byte enables / wdata intact (each target logs what it saw; compared
+    with what was expected),
+  * a request for a page that has no memory reaches no target and is answered
+    with `fault` (and no ready) in the cycle it is presented,
   * writes to flash never reach the flash target,
   * read responses come back in request order with the right data, even though
     the targets answer at different speeds.
@@ -23,9 +26,10 @@ from collections import deque
 from amaranth import Module, Signal
 from amaranth.sim import Simulator
 
-from memory_select import MemorySelect, MemorySelectPipelined
+from memory_select import MemorySelect
+from memory_select_pipelined import MemorySelectPipelined
 
-FLASH, RAM, PERIPH = 0, 1, 2
+FLASH, RAM, PERIPH, NOTHING = 0, 1, 2, 3
 LATENCY = {FLASH: (1, 6), RAM: (1, 3), PERIPH: (1, 2)}
 P_READY = {FLASH: 0.5, RAM: 0.8, PERIPH: 0.9}
 PERIPH_MASK = 0b11  # UART_ADDR_WIDTH = 2
@@ -35,13 +39,16 @@ def junk(tag, addr):
     return ((tag + 1) * 0x1111 ^ addr * 0x35) & 0xFFFF
 
 
-def route(space, addr):
+def route(addr):
     """-> (target, address as the target sees it)"""
-    if addr < 0x800:
-        return FLASH, addr
-    if space == 3 and addr >> 11 == 0xF:  # DATA space, top page
+    page = addr >> 11
+    if page < 0x2000:
+        return RAM, addr & 0xFFFFFF
+    if page >> 8 == 0x20:
+        return FLASH, addr & 0x7FFFF
+    if page >= 0x8000:
         return PERIPH, addr & PERIPH_MASK
-    return RAM, addr
+    return NOTHING, None
 
 
 def run_case(module, seed, one_read_at_a_time, n_requests=3000):
@@ -54,7 +61,6 @@ def run_case(module, seed, one_read_at_a_time, n_requests=3000):
     expected_seen = {t: [] for t in ports}
     ref = {t: {} for t in ports}
     expected_resp = deque()
-
     # The plain MemorySelect is purely combinational and has no "sync" domain,
     # which the simulator needs for add_clock() and ctx.tick(): give it one
     # through a top level with a dummy register.
@@ -62,7 +68,6 @@ def run_case(module, seed, one_read_at_a_time, n_requests=3000):
     top.submodules.dut = dut
     dummy = Signal()
     top.d.sync += dummy.eq(~dummy)
-
     sim = Simulator(top)
     sim.add_clock(1e-6)
 
@@ -123,35 +128,43 @@ def run_case(module, seed, one_read_at_a_time, n_requests=3000):
                         break
                     await ctx.tick()
                 else:
-                    raise AssertionError("response never arrived")
-            space = rng.randrange(4)
-            addr = rng.randrange(0x8000)
-            if rng.random() < 0.3:
-                addr = rng.randrange(0x800)  # keep flash busy
-            elif rng.random() < 0.3:
-                addr = 0x7800 + rng.randrange(0x800)  # the top page
+                    raise AssertionError('Response never arrived.')
+            kind = rng.choice([FLASH, RAM, RAM, PERIPH, NOTHING])
+            offset = rng.randrange(0x800)
+            if kind == RAM:
+                page = rng.randrange(0x2000)
+            elif kind == FLASH:
+                page = 0x2000 + rng.randrange(0x100)
+            elif kind == PERIPH:
+                page = 0x8000 + rng.randrange(0x8000)
+            else:
+                page = rng.choice([0x2100, 0x7FFF, rng.randrange(0x2100, 0x8000)])
+            addr = page << 11 | offset
             bh, bl = rng.getrandbits(1), rng.getrandbits(1)
             wd = rng.getrandbits(16)
-            ctx.set(dut.space, space)
             ctx.set(cpu.we, we)
             ctx.set(cpu.byte_hi, bh)
             ctx.set(cpu.byte_lo, bl)
             ctx.set(cpu.addr, addr)
             ctx.set(cpu.wdata, wd)
             ctx.set(cpu.valid, 1)
+            tag, taddr = route(addr)
             for _ in range(5000):
-                _, _, ready = await ctx.tick().sample(cpu.ready)
+                _, _, ready, fault = await ctx.tick().sample(cpu.ready, dut.fault)
+                assert fault == (tag == NOTHING), f'fault {fault} for {addr:#x}'
+                if fault:
+                    assert not ready
+                    break
                 if ready:
                     break
             else:
                 raise AssertionError('Request never accepted: deadlock.')
-            tag, taddr = route(space, addr)  # accepted on that edge
-            if we and tag == FLASH:
+            if tag == NOTHING:
+                pass  # refused
+            elif we and tag == FLASH:
                 pass  # dropped
             else:
-                expected_seen[tag].append((
-                    int(we), bh, bl, taddr, wd if we else None
-                ))
+                expected_seen[tag].append((int(we), bh, bl, taddr, wd if we else None))
                 if we:
                     ref[tag][taddr] = wd
                 else:
@@ -161,9 +174,7 @@ def run_case(module, seed, one_read_at_a_time, n_requests=3000):
             await ctx.tick()
         assert not expected_resp, f'{len(expected_resp)} responses missing'
         for tag in ports:
-            assert seen[tag] == expected_seen[tag], (
-                f'target {tag}: requests differ'
-            )
+            assert seen[tag] == expected_seen[tag], f'target {tag}: requests differ'
 
     sim.add_testbench(bench)
     sim.run()

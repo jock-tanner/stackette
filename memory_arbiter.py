@@ -6,8 +6,12 @@ initiators, each with its own address-space tag.
                             address space (Space.CODE / PSTACK / ...) its
                             requests are made in; the winner's tag goes out
                             on `space`, next to `mem`
-  mem      Out(MemoryPort)  towards MemorySelect
+  mem      Out(MemoryPort)  towards the MMU and MemorySelect
   space    Out(Space)
+  fault    In(1)            the refusal of the request that is presented on
+                            `mem` (see MemorySelect); it goes back as `faultN`
+                            to the initiator whose request that is
+  faultN   Out(1)
 
 Fixed priority: port0 wins over port1 and so on. Requests are passed through
 combinationally, with no added latency; the loser simply sees ready low and
@@ -24,19 +28,23 @@ back to back keeps the low-priority one out); fine for a CPU that stalls on
 each of them anyway.
 """
 from amaranth import Const, Module, Signal
-from amaranth.lib import wiring
-from amaranth.lib.wiring import In, Out
+from amaranth.lib.wiring import Component, In, Out
 
 from memory_port import MemoryPort
 from memory_select import Space
 
 
-class MemoryArbiter(wiring.Component):
+class MemoryArbiter(Component):
     def __init__(self, addr_width, n=2):
-        members = {'mem': Out(MemoryPort(addr_width)), 'space': Out(Space)}
+        members = {
+            'mem': Out(MemoryPort(addr_width)),
+            'space': Out(Space),
+            'fault': In(1),
+        }
         for i in range(n):
             members[f'port{i}'] = In(MemoryPort(addr_width))
             members[f'space{i}'] = In(Space)
+            members[f'fault{i}'] = Out(1)
         super().__init__(members)
         self.n = n
 
@@ -77,7 +85,10 @@ class MemoryArbiter(wiring.Component):
                     self.space.eq(spaces[i]),
                 ]
         for i in range(n):
-            m.d.comb += reqs[i].ready.eq(grant[i] & mem.req.ready)
+            m.d.comb += [
+                reqs[i].ready.eq(grant[i] & mem.req.ready),
+                getattr(self, f'fault{i}').eq(grant[i] & self.fault),
+            ]
 
         # ---- who owns the outstanding read ----
         accept_read = Signal()

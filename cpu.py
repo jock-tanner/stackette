@@ -105,6 +105,9 @@ class CPU(Component):
     # drives. Writes go to the inactive context only; the registers after
     # CTX_PSP are read only.
     user: Out(1)
+    # high while the system context is being reset (a soft reset), so that
+    # the MMU puts the default map back into its system registers
+    soft_reset: Out(1)
     ctx_addr: In(4)
     ctx_we: In(1)
     ctx_wdata: In(16)
@@ -1197,6 +1200,7 @@ class CPU(Component):
             # lines of the system stack are dropped.
             with m.State('RESET_SOFT'):
                 m.d.comb += [
+                    self.soft_reset.eq(1),
                     cmd.valid.eq(1),
                     cmd.maint.eq(Maint.INVALIDATE),
                 ]
@@ -1273,36 +1277,21 @@ class CPUTop(Elaboratable):
         from amaranth.build import Pins, Resource
         from amaranth_boards.de0nano import DE0NanoPlatform
 
-        from context_device import ContextDevice
         from de0nano_sdram import DE0NanoSDRAM
         from de0nano_spi_flash import DE0NanoSPIFlash
-        from memory_arbiter import MemoryArbiter
-        from memory_select import MemorySelect
-        from periph_bus import PERIPH_ADDR_WIDTH, PeriphBus
+        from system import System
         from uart import UART
 
         m = Module()
-        m.submodules.cpu = cpu = CPU()
+        m.submodules.system = system = System()
 
-        # connect memory selector to memories
-        m.submodules.mem_sel = mem_sel = MemorySelect(periph_addr_width=PERIPH_ADDR_WIDTH)
+        # connect the system to the memories and the UART
         m.submodules.sdram = sdram = DE0NanoSDRAM()
         m.submodules.flash = flash = DE0NanoSPIFlash()
         m.submodules.uart = uart = UART(divisor=round(50_000_000 / 38_400))
-        connect(m, flash.bus, mem_sel.flash)
-        connect(m, sdram.bus, mem_sel.ram)
-        # the peripherals share the peripheral page
-        m.submodules.periph = periph = PeriphBus()
-        m.submodules.ctx_dev = ctx_dev = ContextDevice()
-        connect(m, periph.bus, mem_sel.periph)
-        connect(m, uart.bus, periph.uart)
-        connect(m, ctx_dev.bus, periph.ctx)
-        m.d.comb += [
-            cpu.ctx_addr.eq(ctx_dev.ctx_addr),
-            cpu.ctx_we.eq(ctx_dev.ctx_we),
-            cpu.ctx_wdata.eq(ctx_dev.ctx_wdata),
-            ctx_dev.ctx_rdata.eq(cpu.ctx_rdata),
-        ]
+        connect(m, flash.bus, system.flash)
+        connect(m, sdram.bus, system.ram)
+        connect(m, uart.bus, system.uart)
 
         # UART pins hookup
         platform.add_resources([
@@ -1313,22 +1302,11 @@ class CPUTop(Elaboratable):
         rx_pin = platform.request('rx')
         m.d.comb += [tx_pin.o.eq(uart.pins.tx), uart.pins.rx.eq(rx_pin.i)]
 
-        # Two initiators share the one MemorySelect port: the stack cache
-        # (port0, wins) and the CPU's code/data accesses (port1). Each comes
-        # with the address space its requests are made in.
-        m.submodules.arb = arb = MemoryArbiter(CPU_ADDR_WIDTH, n=2)
-        connect(m, cpu.stack_mem, arb.port0)
-        m.d.comb += arb.space0.eq(Space.PSTACK)
-        connect(m, cpu.mem, arb.port1)
-        m.d.comb += arb.space1.eq(cpu.space)
-        connect(m, arb.mem, mem_sel.cpu)
-        m.d.comb += mem_sel.space.eq(arb.space)
-
         m.d.comb += [
-            platform.request('led', 0).o.eq(cpu.high_addr[0]),
-            platform.request('led', 1).o.eq(cpu.high_addr[1]),
-            platform.request('led', 2).o.eq(cpu.high_addr[2]),
-            platform.request('led', 3).o.eq(cpu.high_addr[3]),
+            platform.request('led', 0).o.eq(system.high_addr[0]),
+            platform.request('led', 1).o.eq(system.high_addr[1]),
+            platform.request('led', 2).o.eq(system.high_addr[2]),
+            platform.request('led', 3).o.eq(system.high_addr[3]),
         ]
 
         return m
