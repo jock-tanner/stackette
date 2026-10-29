@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Tiny assembler for the LD and ST instructions of the stack CPU (cpu.py).
 
@@ -14,6 +13,8 @@ Syntax, one instruction per line; `;` starts a comment, `name:` defines a label:
     add adc sub sbc and or xor bic  DD, SRC
                         DD: tos, nos, push, under; takes SRC like ld
     ld.b / st.b         8-bit access (ld.bs: byte load, sign-extended)
+
+    .word EXPR, ...     raw 16-bit words
 
 Control flow:
     bra LABEL           branch, a 11-bit word offset from the next instruction
@@ -32,6 +33,12 @@ Control flow:
                         neg and rlc set C Z N V P, rrc C Z N P, the others Z N P.
                         rlc and rrc rotate through the carry.
     setb #m / clrb #m   set / clear the status register bits in the mask m
+    trap #p             a system call: the system context runs, p (0..63) is in its
+                        interrupt ID (the number of class 2). One word, so a trap
+                        can also be a breakpoint.
+    reti                (system mode only) switch to the user context; the system
+                        context continues after it the next time it runs. In user
+                        mode it is an illegal instruction.
 Status register `sr` (a register operand like any other): bit 0 C, 1 Z, 2 N, 3 V,
 4 P. The other bits are not implemented: they read as zero and ignore writes.
 Conditions: eq ne | cs cc (unsigned >= <) | mi pl | vs vc | hi ls (unsigned > <=) |
@@ -169,7 +176,7 @@ def w_gen(op, dd, s, mode, x, extra=None):
 
 
 UNARY = {'not': 0, 'neg': 1, 'sxt': 2, 'bswap': 3, 'rlc': 4, 'rrc': 5}
-CTL = ('bra', 'call', 'calla', 'jmp', 'ret', 'addp', 'skip', 'setb', 'clrb')
+CTL = ('bra', 'call', 'calla', 'jmp', 'ret', 'addp', 'skip', 'setb', 'clrb', 'reti', 'trap')
 CONDITIONS = {
     'eq': 0, 'z': 0, 'ne': 1, 'nz': 1,
     'cs': 2, 'hs': 2, 'c': 2, 'cc': 3, 'lo': 3, 'nc': 3,
@@ -178,7 +185,7 @@ CONDITIONS = {
     'pe': 14, 'po': 15,
 }
 MISC = 0xf800
-MISC_RET_N, MISC_CALL_ABS, MISC_JMP_ABS, MISC_CALL_POP, MISC_RET_VAR = 1, 5, 6, 7, 9
+MISC_RET_N, MISC_RETI, MISC_TRAP, MISC_CALL_ABS, MISC_JMP_ABS, MISC_CALL_POP, MISC_RET_VAR = 1, 2, 4, 5, 6, 7, 9
 
 
 def encode_ctl(name, operands, labels, pc):
@@ -215,6 +222,17 @@ def encode_ctl(name, operands, labels, pc):
         if len(operands) != 1 or operands[0].lower() not in CONDITIONS:
             raise AsmError('skip takes a condition: ' + ' '.join(CONDITIONS))
         return [0xc800 | CONDITIONS[operands[0].lower()] << 6]
+    if name == 'reti':
+        if operands:
+            raise AsmError('reti takes no operand')
+        return [MISC | MISC_RETI << 6]
+    if name == 'trap':
+        if len(operands) != 1 or not operands[0].startswith('#'):
+            raise AsmError('trap takes #p')
+        p = val(operands[0][1:])
+        if not 0 <= p <= 63:
+            raise AsmError('trap #p: p must be 0..63')
+        return [MISC | MISC_TRAP << 6 | p]
     if name == 'ret':
         if not operands:
             return [MISC | MISC_RET_VAR << 6]
@@ -237,6 +255,11 @@ def encode_ctl(name, operands, labels, pc):
 
 def encode(mnemonic, operands, labels, pc=0):
     """-> list of words. With labels == None only the length is meaningful."""
+    if mnemonic.lower() == '.word':
+        if not operands:
+            raise AsmError('.word takes values')
+        return [0 if labels is None and not is_number(x) else value(x, labels or {}) & 0xffff
+                for x in operands]
     name, _, suffix = mnemonic.lower().partition('.')
     if name in CTL:
         if suffix:

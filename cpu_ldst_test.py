@@ -14,6 +14,11 @@ serving the code port, lets the stack cache drain, then compares the memory
 ranges that cpu_ldst_model.compare_ranges names, and the flags, with the
 reference interpreter.
 
+The programs run in the system context and in the user context (behind a
+two-word system context stub, see STUB). With random faults of the memory
+only the user context is used: each fault makes the stub run and then the
+program goes on from the instruction that failed, which has to leave no trace.
+
 Run with `python test_cpu_ldst.py` (or pytest). Needs cpu_ldst_model.py.
 """
 import random
@@ -23,14 +28,21 @@ from amaranth.sim import Simulator
 from cpu import CPU
 from cpu_ldst_model import Program, compare_ranges, junk
 
+# the system context for a program in the user context: RETI, and a branch
+# back to it (the system context carries on after its RETI). Every exception
+# of the program lands there and the program goes on where it was.
+STUB = [0xf880, 0xc7fe]
 
-def run_case(seed, n_instr=150, p_fault=0.0):
+
+def run_case(seed, n_instr=150, p_fault=0.0, user=False):
     rng = random.Random(seed)
-    prog = Program(random.Random(seed + 1000)).build(n_instr)
+    prog = Program(
+        random.Random(seed + 1000), prefix=STUB if user else ()
+    ).build(n_instr)
     end_word = prog.end >> 1
     store = {i: w for i, w in enumerate(prog.words)}
     state = {'halted': False, 'aborts': 0}
-    dut = CPU(crawl=0)
+    dut = CPU(crawl=0, user_ip_init=2 * len(STUB) if user else 0)
     sim = Simulator(dut)
     sim.add_clock(1e-6)
 
@@ -86,13 +98,16 @@ def run_case(seed, n_instr=150, p_fault=0.0):
                     ctx.set(port.resp.valid, 0)
         return target
 
+    # a fault can only come against a request that already waits, so with
+    # faults the memories are never always ready
+    readies = [0.7, 0.4] if p_fault else [1.0, 0.7, 0.4]
     sim.add_testbench(
-        serve(dut.mem, dut.mem_fault, rng.choice([1.0, 0.7, 0.4]), True),
-        background=True
+        serve(dut.mem, dut.mem_fault, rng.choice(readies), True),
+        background=True,
     )
     sim.add_testbench(
-        serve(dut.stack_mem, dut.stack_mem_fault, rng.choice([1.0, 0.7, 0.4]), False),
-        background=True
+        serve(dut.stack_mem, dut.stack_mem_fault, rng.choice(readies), False),
+        background=True,
     )
 
     async def count_aborts(ctx):
@@ -137,8 +152,11 @@ def run_case(seed, n_instr=150, p_fault=0.0):
 def test_cpu_ldst():
     for seed in range(6):
         run_case(seed)
-    for seed in range(6, 12):  # restartable instructions: random memory faults
-        run_case(seed, p_fault=0.2)
+    for seed in range(6, 12):  # the same in the user context
+        run_case(seed, user=True)
+    # restartable instructions: random memory faults in the user context
+    for seed in range(12, 18):
+        run_case(seed, user=True, p_fault=0.2)
     print('ok')
 
 

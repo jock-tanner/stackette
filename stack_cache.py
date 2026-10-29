@@ -79,13 +79,17 @@ req.ready is low. A fault of a FILL read is reported on `fault` in that cycle,
 the fill is abandoned and the line stays invalid; the command that wanted the
 line has not executed, and the CPU takes it back (it drops cmd.valid). A
 command executes completely or not at all, so a fault never leaves a command
-half done. Faults of write-backs are not reported: a line only becomes dirty
-if its address was usable when it was written, which the CPU side of the MMU
-has to guarantee (it probes the address when a line is allocated without
-reading it).
+half done.
+
+A write-back (a spilled line from the write buffer, or a line written by
+FLUSH) that the memory refuses is dropped, and `wb_fault` is high for that
+one cycle. It does not belong to any command and it comes after the
+instruction that made the line dirty has finished, so it is asynchronous: the
+CPU latches it and takes it as an unrecoverable fault between two
+instructions. The data of that line is lost.
 
 Outputs: d0..d3 (line data), line_valid / line_dirty (bit k = line k), psp,
-idle (no command executing and the write buffer is empty), fault.
+idle (no command executing and the write buffer is empty), fault, wb_fault.
 """
 from amaranth import Array, Cat, Const, Module, Mux, Signal
 from amaranth.lib import enum, wiring
@@ -147,6 +151,7 @@ class StackCache(wiring.Component):
     idle: Out(1)
     mem_fault: In(1)
     fault: Out(1)
+    wb_fault: Out(1)
 
     def elaborate(self, platform):
         m = Module()
@@ -360,7 +365,10 @@ class StackCache(wiring.Component):
                         req.addr.eq(word_psp + flush_k),
                         req.wdata.eq(data_a[flush_k]),
                     ]
-                    with m.If(req.ready):
+                    # a refused write is dropped, so the flush goes on
+                    with m.If(self.mem_fault):
+                        m.d.comb += self.wb_fault.eq(1)
+                    with m.If(req.ready | self.mem_fault):
                         m.d.sync += [
                             drt_a[flush_k].eq(0),
                             flush_k.eq(flush_k + 1),
@@ -377,7 +385,9 @@ class StackCache(wiring.Component):
                 req.addr.eq(wb_addr),
                 req.wdata.eq(wb_data),
             ]
-            with m.If(req.ready):
+            with m.If(self.mem_fault):
+                m.d.comb += self.wb_fault.eq(1)
+            with m.If(req.ready | self.mem_fault):
                 m.d.sync += wb_valid.eq(0)
 
         m.d.comb += self.idle.eq(fsm.ongoing('IDLE') & ~wb_valid)

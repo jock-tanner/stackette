@@ -52,10 +52,34 @@ UOP_BSWAP = 3
 UOP_RLC = 4
 UOP_RRC = 5
 MISC_RET_N = 1
+MISC_RETI = 2
+MISC_TRAP = 4
 MISC_CALL_ABS = 5
 MISC_JMP_ABS = 6
 MISC_CALL_POP = 7
 MISC_RET_VAR = 9
+# The interrupt ID register tells the system context why it is running: the
+# class in bits 7:6, the number in bits 5:0.
+ID_RESET = 0 << 6   # power-up, the number is 0
+ID_IRQ = 1 << 6     # a hardware interrupt, the number is the interrupt pin
+ID_TRAP = 2 << 6    # TRAP p, the number is p
+ID_FAULT = 3 << 6   # an exception, the number is one of these:
+FAULT_ILLEGAL = 0   # an instruction that does not exist, or RETI in user mode
+FAULT_MEM = 1       # a request of the CPU was refused
+FAULT_STACK = 2     # a fill of the stack cache was refused
+FAULT_WB = 3        # a write-back of the stack cache was refused (asynchronous)
+# the registers of the inactive context and the exception data, as the CPU
+# shows them on its `ctx_*` port (word numbers)
+CTX_IP = 0
+CTX_RSP = 1
+CTX_SFP = 2
+CTX_MBP = 3
+CTX_MIDX = 4
+CTX_SW = 5
+CTX_PSP = 6
+CTX_ID = 7          # read only from here on
+CTX_FAULT_IP = 8
+CTX_FAULT_ADDR = 9
 
 
 class CPU(Component):
@@ -74,12 +98,25 @@ class CPU(Component):
     stack_mem_fault: In(1)
     aborted: Out(1)     # one cycle, when an instruction has been abandoned
 
+    # The user flag tells which context is active: 0 system, 1 user. No
+    # instruction can read it. The registers of the other context (IP, RSP,
+    # SFP, MBP, MIDX, SW and PSP) and the exception data are reachable by
+    # word number through this port, which the memory-mapped context device
+    # drives. Writes go to the inactive context only; the registers after
+    # CTX_PSP are read only.
+    user: Out(1)
+    ctx_addr: In(4)
+    ctx_we: In(1)
+    ctx_wdata: In(16)
+    ctx_rdata: Out(16)
+
     # for display purpose
     high_addr: Out(4)
 
-    def __init__(self, *, crawl=0xfff):
+    def __init__(self, *, crawl=0xfff, user_ip_init=IP_INIT):
         super().__init__()
         self.crawl = crawl
+        self.user_ip_init = user_ip_init
 
     def elaborate(self, platform):
         m = Module()
@@ -102,7 +139,27 @@ class CPU(Component):
         mbp = Signal(16)
         midx = Signal(16)
         sw = Signal(16)
+        # the inactive context. RETI and TRAP (and the exceptions) exchange
+        # it with the registers above; PSP lives in the stack cache.
+        b_ip = Signal(16, init=self.user_ip_init)
+        b_rsp = Signal(16, init=RSP_INIT)
+        b_sfp = Signal(16, init=SFP_INIT)
+        b_mbp = Signal(16)
+        b_midx = Signal(16)
+        b_sw = Signal(16)
+        b_psp = Signal(16, init=PSP_INIT)
+        user = Signal()
+        m.d.comb += self.user.eq(user)
+        # why the system context runs, and what is known about an exception
+        intr_id = Signal(16, init=ID_RESET)
+        fault_ip = Signal(16)       # where the instruction that failed starts
+        fault_addr = Signal(16)     # the byte address of the refused request
+        exc_code = Signal(16)       # the ID to be delivered
+        # a refused write-back of the stack cache, until it is taken
+        pend_wb = Signal()
+        wb_addr = Signal(16)
         # visible to testbenches
+        self.intr_id = intr_id
         self.sw = sw
         self.sfp = sfp
         self.rsp = rsp
@@ -163,6 +220,8 @@ class CPU(Component):
         is_call_abs = is_misc & (misc_op == MISC_CALL_ABS)
         is_jmp_abs = is_misc & (misc_op == MISC_JMP_ABS)
         is_call_pop = is_misc & (misc_op == MISC_CALL_POP)
+        is_reti = is_misc & (misc_op == MISC_RETI)
+        is_trap = is_misc & (misc_op == MISC_TRAP)
         is_call_direct = is_call_rel | is_call_abs
         reg_mode = is_gen & (mode == MODE_REG)
         ptr_mode = is_gen & (
@@ -189,6 +248,8 @@ class CPU(Component):
                 is_bra | is_skip | is_setclr | is_addp | ok_unary | is_call_rel
                 | is_ret
                 | is_call_abs | is_jmp_abs | is_call_pop
+                # RETI is an illegal instruction in user mode
+                | (is_reti & ~user) | is_trap
         )
         ok = ok_ld | ok_st | ok_alu | ok_ctl
 
@@ -456,7 +517,10 @@ class CPU(Component):
         # they put the popped value back (UNDO).
         # IP and SKIP are restored from `istart`: a skipped instruction is
         # abandoned together with the SKIP before it, which then runs again.
-        def abort(first_fetch=False):
+        # An abandoned instruction is an exception: see ABORT.
+        def abort(code=None, addr=0, first_fetch=False):
+            if code is not None:
+                note_fault(code, addr, first_fetch)
             if first_fetch:
                 # the first word of the instruction: IP did not move yet
                 m.d.sync += ip.eq(Mux(skipping, istart, ip))
@@ -464,6 +528,42 @@ class CPU(Component):
                 m.d.sync += ip.eq(istart)
             m.d.sync += skipping.eq(0)
             m.next = 'ABORT'
+
+        # what is known about the exception: the ID and the address of the
+        # request, and where the instruction starts
+        def note_fault(code, addr, first_fetch=False):
+            m.d.sync += [
+                exc_code.eq(code),
+                fault_addr.eq(addr),
+                fault_ip.eq(Mux(skipping, istart, ip) if first_fetch else istart),
+            ]
+
+        # the refusal of a request of the CPU, or of a fill of the stack
+        # cache; `undo` for the ST and CALL pop that have popped the stack
+        def mem_refused(undo=False, first_fetch=False):
+            addr = Cat(C(0, 1), req.addr)
+            if undo:
+                note_fault(ID_FAULT | FAULT_MEM, addr)
+                m.next = 'UNDO'
+            else:
+                abort(ID_FAULT | FAULT_MEM, addr, first_fetch)
+
+        def stack_refused(undo=False):
+            addr = Cat(C(0, 1), self.stack_mem.req.addr)
+            if undo:
+                note_fault(ID_FAULT | FAULT_STACK, addr)
+                m.next = 'UNDO'
+            else:
+                abort(ID_FAULT | FAULT_STACK, addr)
+
+        # the instruction that has been abandoned or has trapped makes the
+        # system context run: from the user context by a switch, from the
+        # system context by a soft reset
+        def enter_system():
+            with m.If(user):
+                m.next = 'SW_FLUSH'
+            with m.Else():
+                m.next = 'RESET_SOFT'
 
         def data_space():
             with m.If(is_pfp | sp_mem):
@@ -486,14 +586,19 @@ class CPU(Component):
             # ---- fetch ----
             with m.State('FETCH'):
                 m.d.comb += [
-                    req.valid.eq(1),
+                    # a pending asynchronous fault is taken here, between two
+                    # instructions, and the fetch is not made
+                    req.valid.eq(~pend_wb),
                     req.we.eq(0),
                     req.byte_hi.eq(1),
                     req.byte_lo.eq(1),
                     req.addr.eq(ip[1:]),
                 ]
-                with m.If(self.mem_fault):
-                    abort(first_fetch=True)
+                with m.If(pend_wb):
+                    m.d.sync += pend_wb.eq(0)
+                    abort(ID_FAULT | FAULT_WB, wb_addr, first_fetch=True)
+                with m.Elif(self.mem_fault):
+                    mem_refused(first_fetch=True)
                 with m.Elif(req.ready):
                     m.next = 'FETCH_WAIT'
 
@@ -517,7 +622,7 @@ class CPU(Component):
                         m.d.sync += skipping.eq(0)
                         m.next = after
                 with m.Elif(~ok):
-                    m.next = after
+                    abort(ID_FAULT | FAULT_ILLEGAL)
                 with m.Elif(needs_extra):
                     m.next = 'EXTRA'
                 with m.Else():
@@ -533,7 +638,7 @@ class CPU(Component):
                     req.addr.eq(ip[1:]),
                 ]
                 with m.If(self.mem_fault):
-                    abort()
+                    mem_refused()
                 with m.Elif(req.ready):
                     m.next = 'EXTRA_WAIT'
 
@@ -590,6 +695,15 @@ class CPU(Component):
                     m.next = 'CALL_RA'
                 with m.Elif(is_ret):
                     m.next = 'RET_FLUSH'
+                with m.Elif(is_reti):
+                    # only in system mode (the user mode RETI is not `ok`)
+                    m.next = 'SW_FLUSH'
+                with m.Elif(is_trap):
+                    m.d.sync += [
+                        exc_code.eq(ID_TRAP | instr[0:6]),
+                        fault_ip.eq(istart),
+                    ]
+                    enter_system()
                 with m.Else():
                     m.next = after
 
@@ -621,7 +735,7 @@ class CPU(Component):
                     req.addr.eq(ea[1:]),
                 ]
                 with m.If(self.mem_fault):
-                    abort()
+                    mem_refused()
                 with m.Elif(req.ready):
                     m.d.sync += lane.eq(ea[0])
                     m.next = 'LD_RD_WAIT'
@@ -669,7 +783,7 @@ class CPU(Component):
                             cmd.arg.eq(src),
                         ]
                 with m.If(stack.fault):
-                    abort()
+                    stack_refused()
                 with m.Elif(cmd.ready):
                     # the commit: MIDX steps for the post-increment and
                     # pre-decrement modes
@@ -711,7 +825,7 @@ class CPU(Component):
                         with m.Case(3):
                             m.d.comb += cmd.shift.eq(Shift.POP_UNDER)
                 with m.If(stack.fault):
-                    abort()
+                    stack_refused()
                 with m.Elif(cmd.ready):
                     m.d.sync += [
                         midx.eq(midx_next),
@@ -748,7 +862,7 @@ class CPU(Component):
                     cmd.shift.eq(Shift.POP),
                 ]
                 with m.If(stack.fault):
-                    abort()
+                    stack_refused()
                 with m.Elif(cmd.ready):
                     m.d.sync += val.eq(stack.d0)
                     m.next = 'CALL_RA'
@@ -766,9 +880,9 @@ class CPU(Component):
                 with m.If(self.mem_fault):
                     # CALL pop has already popped its target
                     with m.If(is_call_pop):
-                        m.next = 'UNDO'
+                        mem_refused(undo=True)
                     with m.Else():
-                        abort()
+                        mem_refused()
                 with m.Elif(req.ready):
                     m.d.sync += rsp.eq(rsp - 2)
                     m.next = 'CALL_LINK'
@@ -819,7 +933,7 @@ class CPU(Component):
                     req.addr.eq((sfp + 2)[1:]),
                 ]
                 with m.If(self.mem_fault):
-                    abort()
+                    mem_refused()
                 with m.Elif(req.ready):
                     m.next = 'RET_CNT_WAIT'
 
@@ -838,7 +952,7 @@ class CPU(Component):
                     req.addr.eq(sfp[1:]),
                 ]
                 with m.If(self.mem_fault):
-                    abort()
+                    mem_refused()
                 with m.Elif(req.ready):
                     m.next = 'RET_LNK_WAIT'
 
@@ -858,7 +972,7 @@ class CPU(Component):
                     req.addr.eq(rsp[1:]),
                 ]
                 with m.If(self.mem_fault):
-                    abort()
+                    mem_refused()
                 with m.Elif(req.ready):
                     m.next = 'RET_IP_WAIT'
 
@@ -902,7 +1016,7 @@ class CPU(Component):
                     with m.Case(3):
                         m.d.comb += cmd.shift.eq(Shift.POP_UNDER)
                 with m.If(stack.fault):
-                    abort()
+                    stack_refused()
                 with m.Elif(cmd.ready):
                     m.d.sync += val.eq(Mux(dd[0], stack.d1, stack.d0))
                     m.next = 'ST_DEST'
@@ -946,9 +1060,9 @@ class CPU(Component):
                 with m.If(stack.fault):
                     # only the item 3 of a byte store after a pop gets here
                     with m.If(dd[1]):
-                        m.next = 'UNDO'
+                        stack_refused(undo=True)
                     with m.Else():
-                        abort()
+                        stack_refused()
                 with m.Elif(cmd.ready):
                     m.next = after
 
@@ -990,9 +1104,9 @@ class CPU(Component):
                 ]
                 with m.If(self.mem_fault):
                     with m.If(dd[1]):
-                        m.next = 'UNDO'
+                        mem_refused(undo=True)
                     with m.Else():
-                        abort()
+                        mem_refused()
                 with m.Elif(req.ready):
                     m.d.sync += midx.eq(midx_next)
                     m.next = after
@@ -1012,11 +1126,102 @@ class CPU(Component):
                 with m.If(cmd.ready):
                     abort()
 
-            # The instruction has left no trace. Fetch it again: this is where
-            # the exception entry will be.
+            # The instruction has left no trace (IP is where it starts) and
+            # the exception is known (exc_code, fault_ip, fault_addr). The
+            # system context takes over.
             with m.State('ABORT'):
                 m.d.comb += self.aborted.eq(1)
-                m.next = after
+                enter_system()
+
+            # ---- changing the context ----
+            # RETI (system to user), TRAP and the exceptions of the user
+            # context (user to system) exchange the registers of the two
+            # contexts. Each has its own parameter stack: the stack cache
+            # writes its lines back, and SET_PSP switches it to the other
+            # stack, which is read back as needed. IP is the one of the
+            # next instruction for RETI and TRAP and the one of the
+            # instruction that failed for an exception, so the user context
+            # carries on with it, and the system context carries on after
+            # its RETI.
+            with m.State('SW_FLUSH'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.maint.eq(Maint.FLUSH),
+                ]
+                with m.If(cmd.ready):
+                    m.next = 'SW_WAIT'
+
+            # wait until all the write-backs are done; a refused one belongs
+            # to the context that is leaving
+            with m.State('SW_WAIT'):
+                with m.If(stack.idle):
+                    with m.If(pend_wb):
+                        m.d.sync += [
+                            pend_wb.eq(0),
+                            exc_code.eq(ID_FAULT | FAULT_WB),
+                            fault_addr.eq(wb_addr),
+                            fault_ip.eq(istart),
+                        ]
+                        with m.If(user):
+                            m.next = 'SW_PSP'
+                        with m.Else():
+                            m.next = 'RESET_SOFT'
+                    with m.Else():
+                        m.next = 'SW_PSP'
+
+            with m.State('SW_PSP'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.maint.eq(Maint.SET_PSP),
+                    cmd.arg.eq(b_psp),
+                ]
+                with m.If(cmd.ready):
+                    m.d.sync += [
+                        ip.eq(b_ip), b_ip.eq(ip),
+                        rsp.eq(b_rsp), b_rsp.eq(rsp),
+                        sfp.eq(b_sfp), b_sfp.eq(sfp),
+                        mbp.eq(b_mbp), b_mbp.eq(mbp),
+                        midx.eq(b_midx), b_midx.eq(midx),
+                        sw.eq(b_sw), b_sw.eq(sw),
+                        b_psp.eq(stack.psp),
+                        user.eq(~user),
+                        skipping.eq(0),
+                    ]
+                    with m.If(user):
+                        m.d.sync += intr_id.eq(exc_code)
+                    m.next = after
+
+            # ---- soft reset: an exception in the system context ----
+            # the system context gets its power-up values (the user context
+            # is left as it is), and the ID tells the reason. The dirty
+            # lines of the system stack are dropped.
+            with m.State('RESET_SOFT'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.maint.eq(Maint.INVALIDATE),
+                ]
+                with m.If(cmd.ready):
+                    m.d.sync += [
+                        ip.eq(IP_INIT),
+                        rsp.eq(RSP_INIT),
+                        sfp.eq(SFP_INIT),
+                        mbp.eq(0),
+                        midx.eq(0),
+                        sw.eq(0),
+                        skipping.eq(0),
+                        pend_wb.eq(0),
+                        intr_id.eq(exc_code),
+                    ]
+                    m.next = 'RESET_PSP'
+
+            with m.State('RESET_PSP'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.maint.eq(Maint.SET_PSP),
+                    cmd.arg.eq(PSP_INIT),
+                ]
+                with m.If(cmd.ready):
+                    m.next = after
 
             if self.crawl:
                 # delay for display purpose
@@ -1028,6 +1233,38 @@ class CPU(Component):
                     with m.Else():
                         m.d.sync += wait_cnt.eq(wait_cnt - 1)
 
+        # ---- the context port ----
+        ctx_regs = Array([
+            b_ip, b_rsp, b_sfp, b_mbp, b_midx, b_sw, b_psp,
+            intr_id, fault_ip, fault_addr,
+        ])
+        with m.If(self.ctx_addr < 10):
+            m.d.comb += self.ctx_rdata.eq(ctx_regs[self.ctx_addr])
+        with m.If(self.ctx_we):
+            with m.Switch(self.ctx_addr):
+                with m.Case(CTX_IP):
+                    m.d.sync += b_ip.eq(self.ctx_wdata)
+                with m.Case(CTX_RSP):
+                    m.d.sync += b_rsp.eq(self.ctx_wdata)
+                with m.Case(CTX_SFP):
+                    m.d.sync += b_sfp.eq(self.ctx_wdata)
+                with m.Case(CTX_MBP):
+                    m.d.sync += b_mbp.eq(self.ctx_wdata)
+                with m.Case(CTX_MIDX):
+                    m.d.sync += b_midx.eq(self.ctx_wdata)
+                with m.Case(CTX_SW):
+                    m.d.sync += b_sw.eq(self.ctx_wdata & SR_MASK)
+                with m.Case(CTX_PSP):
+                    m.d.sync += b_psp.eq(self.ctx_wdata)
+
+        # a refused write-back, latched until the next instruction boundary.
+        # This comes last so that it wins over the clearing above.
+        with m.If(stack.wb_fault):
+            m.d.sync += [
+                pend_wb.eq(1),
+                wb_addr.eq(Cat(C(0, 1), self.stack_mem.req.addr)),
+            ]
+
         return m
 
 
@@ -1036,23 +1273,36 @@ class CPUTop(Elaboratable):
         from amaranth.build import Pins, Resource
         from amaranth_boards.de0nano import DE0NanoPlatform
 
+        from context_device import ContextDevice
         from de0nano_sdram import DE0NanoSDRAM
         from de0nano_spi_flash import DE0NanoSPIFlash
         from memory_arbiter import MemoryArbiter
         from memory_select import MemorySelect
+        from periph_bus import PERIPH_ADDR_WIDTH, PeriphBus
         from uart import UART
 
         m = Module()
         m.submodules.cpu = cpu = CPU()
 
         # connect memory selector to memories
-        m.submodules.mem_sel = mem_sel = MemorySelect()
+        m.submodules.mem_sel = mem_sel = MemorySelect(periph_addr_width=PERIPH_ADDR_WIDTH)
         m.submodules.sdram = sdram = DE0NanoSDRAM()
         m.submodules.flash = flash = DE0NanoSPIFlash()
         m.submodules.uart = uart = UART(divisor=round(50_000_000 / 38_400))
         connect(m, flash.bus, mem_sel.flash)
         connect(m, sdram.bus, mem_sel.ram)
-        connect(m, uart.bus, mem_sel.periph)
+        # the peripherals share the peripheral page
+        m.submodules.periph = periph = PeriphBus()
+        m.submodules.ctx_dev = ctx_dev = ContextDevice()
+        connect(m, periph.bus, mem_sel.periph)
+        connect(m, uart.bus, periph.uart)
+        connect(m, ctx_dev.bus, periph.ctx)
+        m.d.comb += [
+            cpu.ctx_addr.eq(ctx_dev.ctx_addr),
+            cpu.ctx_we.eq(ctx_dev.ctx_we),
+            cpu.ctx_wdata.eq(ctx_dev.ctx_wdata),
+            ctx_dev.ctx_rdata.eq(cpu.ctx_rdata),
+        ]
 
         # UART pins hookup
         platform.add_resources([

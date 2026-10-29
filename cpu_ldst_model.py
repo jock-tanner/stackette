@@ -408,7 +408,10 @@ class Ref:
 # ---- random program generator ----
 
 class Program:
-    def __init__(self, rng):
+    def __init__(self, rng, prefix=()):
+        # `prefix`: words in front of the program (a stub for the system
+        # context); the program starts with its JMP right after them
+        self.prefix = list(prefix)
         self.rng = rng
         self.words = []
         self.ref = Ref()
@@ -757,10 +760,11 @@ class Program:
         r = self.rng
         # code layout: JMP main, the functions, then main
         self.live = False
-        self.words = [0, 0]
+        p = len(self.prefix)
+        self.words = self.prefix + [0, 0]
         for _ in range(r.randint(0, 4)):
             self.make_func()
-        self.words[0:2] = i_misc(MISC_JMP_ABS, extra=self.addr)
+        self.words[p:p + 2] = i_misc(MISC_JMP_ABS, extra=self.addr)
         self.live = True
         self.set_far()
         while self.depth < 4:

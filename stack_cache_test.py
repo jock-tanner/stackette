@@ -105,13 +105,11 @@ def run_case(seed, p_ready, n_commands):
 
     # command helpers
     async def issue(ctx, **fields):
-        """
-        Present a command until accepted. Returns the lines as the command
-        saw them on the executing edge.
-        """
+        """Present a command until accepted. Returns the lines as the command
+        saw them on the executing edge."""
         values = dict(
             maint=Maint.NONE.value, shift=Shift.NONE.value, need=0, arg=0,
-            w0_en=0, w0_pos=0, w0_data=0, w1_en=0, w1_pos=0, w1_data=0
+            w0_en=0, w0_pos=0, w0_data=0, w1_en=0, w1_pos=0, w1_data=0,
         )
         values.update(fields)
         for name, value in values.items():
@@ -119,7 +117,7 @@ def run_case(seed, p_ready, n_commands):
         ctx.set(cmd.valid, 1)
         for _ in range(2000):
             _, _, ready, d0, d1, d2, d3, lv = await ctx.tick().sample(
-                cmd.ready, dut.d0, dut.d1, dut.d2, dut.d3, dut.line_valid
+                cmd.ready, dut.d0, dut.d1, dut.d2, dut.d3, dut.line_valid,
             )
             if ready:
                 break
@@ -180,7 +178,7 @@ def run_case(seed, p_ready, n_commands):
                     await issue(
                         ctx,
                         maint=Maint.SET_PSP.value,
-                        arg=(ref.psp + 2 * up) & 0xFFFF
+                        arg=(ref.psp + 2 * up) & 0xFFFF,
                     )
                     ref.psp += 2 * up
                 else:
@@ -190,7 +188,7 @@ def run_case(seed, p_ready, n_commands):
                 options = [Shift.NONE, Shift.PUSH, Shift.PUSH_UNDER]
                 if depth > -40:
                     options += [
-                        Shift.POP, Shift.POP_UNDER, Shift.POP, Shift.POP_UNDER
+                        Shift.POP, Shift.POP_UNDER, Shift.POP, Shift.POP_UNDER,
                     ]
                 if depth > 60:
                     options = [Shift.POP, Shift.POP_UNDER, Shift.NONE]
@@ -229,9 +227,122 @@ def run_case(seed, p_ready, n_commands):
     sim.run()
 
 
+def run_fault_case():
+    """Directed: a refused fill is reported on `fault` and the command waits and
+    goes through when the fill works; a refused write-back (a spill, a line of
+    FLUSH) is reported on `wb_fault`, dropped, and does not stop anything."""
+    dut = StackCache()
+    cmd = dut.cmd
+    req, resp = dut.mem.req, dut.mem.resp
+    store = {}
+    log = {'reads': 0, 'writes': 0, 'fault': 0, 'wb_fault': 0}
+    budget = {'read': 0, 'write': 0}            # refusals still to give
+
+    sim = Simulator(dut)
+    sim.add_clock(1e-6)
+
+    # a memory that makes every request wait one cycle, then refuses it if
+    # there is a refusal to give, and accepts it the cycle after
+    async def memory(ctx):
+        pending = []
+        ready_now = False
+        just_refused = False
+        ctx.set(req.ready, 0)
+        ctx.set(dut.mem_fault, 0)
+        while True:
+            _, _, valid, we, addr, wdata, f, wf = await ctx.tick().sample(
+                req.valid, req.we, req.addr, req.wdata, dut.fault, dut.wb_fault)
+            log['fault'] += f
+            log['wb_fault'] += wf
+            for item in pending:
+                item[0] -= 1
+            accepted = valid and ready_now
+            if accepted:
+                if we:
+                    store[addr] = wdata
+                    log['writes'] += 1
+                else:
+                    pending.append([1, store.get(addr, initial(2 * addr))])
+                    log['reads'] += 1
+            refuse = False
+            if valid and not accepted and not just_refused:
+                kind = 'write' if we else 'read'
+                if budget[kind]:
+                    budget[kind] -= 1
+                    refuse = True
+            just_refused = refuse
+            ready_now = bool(valid and not accepted and not refuse)
+            ctx.set(req.ready, ready_now)
+            ctx.set(dut.mem_fault, refuse)
+            if pending and pending[0][0] <= 0:
+                head = pending.pop(0)
+                ctx.set(resp.valid, 1)
+                ctx.set(resp.data, head[1])
+            else:
+                ctx.set(resp.valid, 0)
+
+    sim.add_testbench(memory, background=True)
+
+    async def issue(ctx, **fields):
+        values = dict(maint=Maint.NONE.value, shift=Shift.NONE.value, need=0,
+                      arg=0, w0_en=0, w0_pos=0, w0_data=0,
+                      w1_en=0, w1_pos=0, w1_data=0)
+        values.update(fields)
+        for name, value in values.items():
+            ctx.set(getattr(cmd, name), value)
+        ctx.set(cmd.valid, 1)
+        for _ in range(2000):
+            _, _, ready = await ctx.tick().sample(cmd.ready)
+            if ready:
+                break
+        else:
+            raise AssertionError('Command never accepted: deadlock.')
+        ctx.set(cmd.valid, 0)
+
+    async def wait_idle(ctx):
+        for _ in range(2000):
+            _, _, idle = await ctx.tick().sample(dut.idle)
+            if idle:
+                return
+        raise AssertionError('Cache never became idle.')
+
+    async def bench(ctx):
+        await issue(ctx, maint=Maint.SET_PSP.value, arg=BASE)
+        await wait_idle(ctx)
+
+        # a refused fill: reported once, the command still executes later
+        budget['read'] = 1
+        await issue(ctx, need=0b0001)
+        assert log['fault'] == 1 and log['reads'] == 1, log
+        assert ctx.get(dut.line_valid) & 1
+
+        # a refused spill: the fifth push evicts a dirty line 3
+        budget['write'] = 1
+        for k in range(5):
+            await issue(ctx, shift=Shift.PUSH.value, arg=0x100 + k)
+        await wait_idle(ctx)
+        assert log['wb_fault'] == 1 and log['writes'] == 0, log
+        assert (BASE >> 1) - 1 not in store
+
+        # a refused line of FLUSH: the other lines are written, FLUSH ends
+        await issue(ctx, maint=Maint.FLUSH.value)
+        await wait_idle(ctx)
+        assert log['wb_fault'] == 1 and log['writes'] == 4, log
+        for k in range(4):
+            await issue(ctx, shift=Shift.PUSH.value, arg=0x200 + k)
+        budget['write'] = 1
+        await issue(ctx, maint=Maint.FLUSH.value)
+        await wait_idle(ctx)
+        assert log['wb_fault'] == 2 and log['writes'] == 4 + 3, log
+
+    sim.add_testbench(bench)
+    sim.run()
+
+
 def test_stack_cache():
     for seed, p_ready in enumerate([1.0, 0.6, 0.3, 0.8]):
         run_case(seed, p_ready, n_commands=1500)
+    run_fault_case()
     print('ok')
 
 
