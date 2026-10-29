@@ -1,5 +1,5 @@
 from amaranth import *
-from amaranth.lib.wiring import Component, Out, connect, flipped
+from amaranth.lib.wiring import Component, In, Out, connect, flipped
 
 from alu import ALU, OpCodes
 from memory_port import MemoryPort
@@ -64,6 +64,16 @@ class CPU(Component):
     stack_mem: Out(MemoryPort(CPU_ADDR_WIDTH))  # the stack cache's spill/fill port
                                                 # (always Space.PSTACK)
 
+    # A fault is the memory's way to refuse a request (no memory there, page
+    # not mapped): it is high in the cycle the request is presented, instead of
+    # req.ready. The instruction is then abandoned, with the registers and the
+    # stack as they were before it, and fetched again (see ABORT).
+    # `stack_mem_fault` is the same for the fill reads of the stack cache;
+    # write-backs must not fault.
+    mem_fault: In(1)
+    stack_mem_fault: In(1)
+    aborted: Out(1)     # one cycle, when an instruction has been abandoned
+
     # for display purpose
     high_addr: Out(4)
 
@@ -79,6 +89,7 @@ class CPU(Component):
         # is passed straight out of the CPU as `stack_mem`.
         m.submodules.stack = stack = StackCache()
         connect(m, flipped(self.stack_mem), stack.mem)
+        m.d.comb += stack.mem_fault.eq(self.stack_mem_fault)
         cmd = stack.cmd
 
         # memory interface
@@ -103,6 +114,9 @@ class CPU(Component):
         val = Signal(16)    # the operand in transit
         lane = Signal()     # address bit 0 of a byte load
         link = Signal(16)   # the caller's frame pointer, read by RET
+        istart = Signal(16, init=IP_INIT)   # where the instruction being
+                                            # executed starts (for a skipped
+                                            # one, the SKIP before it)
         # set by SKIP: the next instruction is fetched but not executed
         skipping = Signal()
 
@@ -314,6 +328,16 @@ class CPU(Component):
             st_item.eq(lines[st_pos]),
             st_need.eq(need_of(st_pos)),
         ]
+        # the position of the destination item before the pop (`st_pos` is
+        # numbered after it): a byte store reads its old word, and that is
+        # fetched with the pop's command, before the pop. The item that is
+        # number 3 after a pop is not in the window yet (st_pre is 4); it
+        # is fetched later and a fault there is undone.
+        st_pre = Signal(3)
+        with m.If(dd[1] & ~((dd == 3) & (st_pos == 0))):
+            m.d.comb += st_pre.eq(st_pos + 1)
+        with m.Else():
+            m.d.comb += st_pre.eq(st_pos)
 
         # ---- SKIP condition ----
         # the flags in `sw`: C, Z, N, V, P (even parity)
@@ -418,6 +442,29 @@ class CPU(Component):
         # delay for display purpose
         after = 'WAIT' if self.crawl else 'FETCH'
 
+        # ---- restartable instructions ----
+        # An instruction may be abandoned when a memory request or a fill of
+        # the stack cache faults, and executed again later, so every
+        # instruction has a commit point: a cache command (or register write)
+        # that changes the registers and the stack for good, and nothing
+        # that can fault comes after it. Before it only things happen that
+        # a second execution does the same again (a store of the same value
+        # to the same address, FLUSH of the cache), and the registers that
+        # the instruction updates (MIDX, RSP, SFP, flags, PSP) are changed
+        # at the commit. The exceptions are the instructions that pop the
+        # stack before their last memory access (ST with a pop, CALL pop):
+        # they put the popped value back (UNDO).
+        # IP and SKIP are restored from `istart`: a skipped instruction is
+        # abandoned together with the SKIP before it, which then runs again.
+        def abort(first_fetch=False):
+            if first_fetch:
+                # the first word of the instruction: IP did not move yet
+                m.d.sync += ip.eq(Mux(skipping, istart, ip))
+            else:
+                m.d.sync += ip.eq(istart)
+            m.d.sync += skipping.eq(0)
+            m.next = 'ABORT'
+
         def data_space():
             with m.If(is_pfp | sp_mem):
                 m.d.comb += self.space.eq(Space.PSTACK)
@@ -445,7 +492,9 @@ class CPU(Component):
                     req.byte_lo.eq(1),
                     req.addr.eq(ip[1:]),
                 ]
-                with m.If(req.ready):
+                with m.If(self.mem_fault):
+                    abort(first_fetch=True)
+                with m.Elif(req.ready):
                     m.next = 'FETCH_WAIT'
 
             with m.State('FETCH_WAIT'):
@@ -454,6 +503,8 @@ class CPU(Component):
                         ip.eq(ip + 2),
                         instr.eq(resp.data),
                     ]
+                    with m.If(~skipping):
+                        m.d.sync += istart.eq(ip)
                     m.next = 'DECODE'
 
             with m.State('DECODE'):
@@ -481,7 +532,9 @@ class CPU(Component):
                     req.byte_lo.eq(1),
                     req.addr.eq(ip[1:]),
                 ]
-                with m.If(req.ready):
+                with m.If(self.mem_fault):
+                    abort()
+                with m.Elif(req.ready):
                     m.next = 'EXTRA_WAIT'
 
             with m.State('EXTRA_WAIT'):
@@ -567,11 +620,10 @@ class CPU(Component):
                     req.byte_lo.eq(byte_lo),
                     req.addr.eq(ea[1:]),
                 ]
-                with m.If(req.ready):
-                    m.d.sync += [
-                        lane.eq(ea[0]),
-                        midx.eq(midx_next),
-                    ]
+                with m.If(self.mem_fault):
+                    abort()
+                with m.Elif(req.ready):
+                    m.d.sync += lane.eq(ea[0])
                     m.next = 'LD_RD_WAIT'
 
             with m.State('LD_RD_WAIT'):
@@ -616,7 +668,12 @@ class CPU(Component):
                             cmd.shift.eq(Shift.PUSH_UNDER),
                             cmd.arg.eq(src),
                         ]
-                with m.If(cmd.ready):
+                with m.If(stack.fault):
+                    abort()
+                with m.Elif(cmd.ready):
+                    # the commit: MIDX steps for the post-increment and
+                    # pre-decrement modes
+                    m.d.sync += midx.eq(midx_next)
                     m.next = after
 
             # ---- ALU: result and flags in one cache command ----
@@ -653,8 +710,11 @@ class CPU(Component):
                             m.d.comb += cmd.shift.eq(Shift.POP)
                         with m.Case(3):
                             m.d.comb += cmd.shift.eq(Shift.POP_UNDER)
-                with m.If(cmd.ready):
+                with m.If(stack.fault):
+                    abort()
+                with m.Elif(cmd.ready):
                     m.d.sync += [
+                        midx.eq(midx_next),
                         sw[1].eq(alu.zero),
                         sw[2].eq(alu.sign),
                         sw[4].eq(alu.parity),
@@ -687,7 +747,9 @@ class CPU(Component):
                     cmd.need.eq(0b0001),
                     cmd.shift.eq(Shift.POP),
                 ]
-                with m.If(cmd.ready):
+                with m.If(stack.fault):
+                    abort()
+                with m.Elif(cmd.ready):
                     m.d.sync += val.eq(stack.d0)
                     m.next = 'CALL_RA'
 
@@ -701,7 +763,13 @@ class CPU(Component):
                     req.addr.eq((rsp - 2)[1:]),
                     req.wdata.eq(ip),
                 ]
-                with m.If(req.ready):
+                with m.If(self.mem_fault):
+                    # CALL pop has already popped its target
+                    with m.If(is_call_pop):
+                        m.next = 'UNDO'
+                    with m.Else():
+                        abort()
+                with m.Elif(req.ready):
                     m.d.sync += rsp.eq(rsp - 2)
                     m.next = 'CALL_LINK'
 
@@ -750,7 +818,9 @@ class CPU(Component):
                     req.byte_lo.eq(1),
                     req.addr.eq((sfp + 2)[1:]),
                 ]
-                with m.If(req.ready):
+                with m.If(self.mem_fault):
+                    abort()
+                with m.Elif(req.ready):
                     m.next = 'RET_CNT_WAIT'
 
             with m.State('RET_CNT_WAIT'):
@@ -767,24 +837,17 @@ class CPU(Component):
                     req.byte_lo.eq(1),
                     req.addr.eq(sfp[1:]),
                 ]
-                with m.If(req.ready):
+                with m.If(self.mem_fault):
+                    abort()
+                with m.Elif(req.ready):
                     m.next = 'RET_LNK_WAIT'
 
             with m.State('RET_LNK_WAIT'):
                 with m.If(resp.valid):
                     m.d.sync += link.eq(resp.data)
-                    m.next = 'RET_SP'
-
-            with m.State('RET_SP'):
-                m.d.comb += [
-                    cmd.valid.eq(1),
-                    cmd.maint.eq(Maint.SET_PSP),
-                    cmd.arg.eq(sfp + 2 + Cat(C(0, 1), val)),
-                ]
-                with m.If(cmd.ready):
-                    m.d.sync += sfp.eq(link)
                     m.next = 'RET_IP_RD'
 
+            # the last read; nothing is changed until RET_SP
             with m.State('RET_IP_RD'):
                 rstack_space()
                 m.d.comb += [
@@ -794,27 +857,53 @@ class CPU(Component):
                     req.byte_lo.eq(1),
                     req.addr.eq(rsp[1:]),
                 ]
-                with m.If(req.ready):
-                    m.d.sync += rsp.eq(rsp + 2)
+                with m.If(self.mem_fault):
+                    abort()
+                with m.Elif(req.ready):
                     m.next = 'RET_IP_WAIT'
 
+            # IP is not a committed value yet: an abort restores it
             with m.State('RET_IP_WAIT'):
                 with m.If(resp.valid):
                     m.d.sync += ip.eq(resp.data)
+                    m.next = 'RET_SP'
+
+            # the commit, which cannot fault: the cache was flushed, so there
+            # is nothing to write back
+            with m.State('RET_SP'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.maint.eq(Maint.SET_PSP),
+                    cmd.arg.eq(sfp + 2 + Cat(C(0, 1), val)),
+                ]
+                with m.If(cmd.ready):
+                    m.d.sync += [
+                        sfp.eq(link),
+                        rsp.eq(rsp + 2),
+                    ]
                     m.next = after
 
             # ---- ST: take the value off the stack ----
             with m.State('ST_POP'):
                 m.d.comb += [
                     cmd.valid.eq(1),
-                    cmd.need.eq(Mux(dd[0], 0b0010, 0b0001)),
+                    cmd.need.eq(
+                        Mux(dd[0], 0b0010, 0b0001)
+                        | Mux(
+                            st_merge,
+                            Cat(st_pre == 0, st_pre == 1, st_pre == 2, st_pre == 3),
+                            0,
+                        )
+                    ),
                 ]
                 with m.Switch(dd):
                     with m.Case(2):
                         m.d.comb += cmd.shift.eq(Shift.POP)
                     with m.Case(3):
                         m.d.comb += cmd.shift.eq(Shift.POP_UNDER)
-                with m.If(cmd.ready):
+                with m.If(stack.fault):
+                    abort()
+                with m.Elif(cmd.ready):
                     m.d.sync += val.eq(Mux(dd[0], stack.d1, stack.d0))
                     m.next = 'ST_DEST'
 
@@ -854,7 +943,13 @@ class CPU(Component):
                     cmd.w0_data.eq(Mux(st_merge, Cat(val[0:8], st_item[8:16]), val_sz)),
                     cmd.need.eq(Mux(st_merge, st_need, 0)),
                 ]
-                with m.If(cmd.ready):
+                with m.If(stack.fault):
+                    # only the item 3 of a byte store after a pop gets here
+                    with m.If(dd[1]):
+                        m.next = 'UNDO'
+                    with m.Else():
+                        abort()
+                with m.Elif(cmd.ready):
                     m.next = after
 
             with m.State('ST_SP'):
@@ -893,9 +988,35 @@ class CPU(Component):
                     req.addr.eq(ea[1:]),
                     req.wdata.eq(wdata),
                 ]
-                with m.If(req.ready):
+                with m.If(self.mem_fault):
+                    with m.If(dd[1]):
+                        m.next = 'UNDO'
+                    with m.Else():
+                        abort()
+                with m.Elif(req.ready):
                     m.d.sync += midx.eq(midx_next)
                     m.next = after
+
+            # ---- abandoning an instruction ----
+            # ST and CALL pop the stack before their last access. Put the
+            # popped value back: PUSH for a pop, PUSH_UNDER for ST with dd 3.
+            with m.State('UNDO'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.arg.eq(val),
+                ]
+                with m.If(is_st & (dd == 3)):
+                    m.d.comb += cmd.shift.eq(Shift.PUSH_UNDER)
+                with m.Else():
+                    m.d.comb += cmd.shift.eq(Shift.PUSH)
+                with m.If(cmd.ready):
+                    abort()
+
+            # The instruction has left no trace. Fetch it again: this is where
+            # the exception entry will be.
+            with m.State('ABORT'):
+                m.d.comb += self.aborted.eq(1)
+                m.next = after
 
             if self.crawl:
                 # delay for display purpose

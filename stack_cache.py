@@ -72,8 +72,20 @@ other master wait for `idle` so the write buffer has been accepted by memory.
 Memory port (`mem`, initiator): word addresses = byte address >> 1, always full
 words. Requests are in order, one outstanding fill at a time.
 
+Faults: `mem_fault` is the memory's way to refuse a request instead of
+accepting it (an address that has no memory behind it, a page that is not
+mapped). It is high in the cycle the request is presented, and then
+req.ready is low. A fault of a FILL read is reported on `fault` in that cycle,
+the fill is abandoned and the line stays invalid; the command that wanted the
+line has not executed, and the CPU takes it back (it drops cmd.valid). A
+command executes completely or not at all, so a fault never leaves a command
+half done. Faults of write-backs are not reported: a line only becomes dirty
+if its address was usable when it was written, which the CPU side of the MMU
+has to guarantee (it probes the address when a line is allocated without
+reading it).
+
 Outputs: d0..d3 (line data), line_valid / line_dirty (bit k = line k), psp,
-idle (no command executing and the write buffer is empty).
+idle (no command executing and the write buffer is empty), fault.
 """
 from amaranth import Array, Cat, Const, Module, Mux, Signal
 from amaranth.lib import enum, wiring
@@ -133,6 +145,8 @@ class StackCache(wiring.Component):
     line_dirty: Out(4)
     psp: Out(16)
     idle: Out(1)
+    mem_fault: In(1)
+    fault: Out(1)
 
     def elaborate(self, platform):
         m = Module()
@@ -272,7 +286,7 @@ class StackCache(wiring.Component):
                                         drt[k].eq(wr[k + 1]),
                                     ]
                                 m.d.sync += [
-                                    drt[0].eq(1),       # line 0 changes address
+                                    drt[0].eq(1),  # line 0 changes address
                                     vld[3].eq(0),
                                     drt[3].eq(0),
                                     self.psp.eq(self.psp + 2),
@@ -311,7 +325,10 @@ class StackCache(wiring.Component):
                     req.byte_lo.eq(1),
                     req.addr.eq(word_psp + fill_k),
                 ]
-                with m.If(req.ready):
+                with m.If(self.mem_fault):
+                    m.d.comb += self.fault.eq(1)
+                    m.next = 'IDLE'
+                with m.Elif(req.ready):
                     m.next = 'FILL_WAIT'
 
             with m.State('FILL_WAIT'):

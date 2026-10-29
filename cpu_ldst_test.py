@@ -24,21 +24,22 @@ from cpu import CPU
 from cpu_ldst_model import Program, compare_ranges, junk
 
 
-def run_case(seed, n_instr=150):
+def run_case(seed, n_instr=150, p_fault=0.0):
     rng = random.Random(seed)
     prog = Program(random.Random(seed + 1000)).build(n_instr)
     end_word = prog.end >> 1
     store = {i: w for i, w in enumerate(prog.words)}
-    state = {'halted': False}
+    state = {'halted': False, 'aborts': 0}
     dut = CPU(crawl=0)
     sim = Simulator(dut)
     sim.add_clock(1e-6)
 
-    def serve(port, p_ready, is_cpu):
+    def serve(port, fault, p_ready, is_cpu):
         async def target(ctx):
             pending = []
             ready_now = True
             ctx.set(port.req.ready, 1)
+            ctx.set(fault, 0)
             while True:
                 _, _, v, we, bh, bl, addr, wd = await ctx.tick().sample(
                     port.req.valid, port.req.we, port.req.byte_hi,
@@ -56,9 +57,27 @@ def run_case(seed, n_instr=150):
                             cur = (cur & 0x00ff) | (wd & 0xff00)
                         store[addr] = cur
                     else:
-                        pending.append([rng.randint(1, 4) - 1, store.get(addr, junk(2 * addr))])
-                ready_now = rng.random() < p_ready and not (is_cpu and state['halted'])
+                        pending.append([
+                            rng.randint(1, 4) - 1,
+                            store.get(addr, junk(2 * addr))
+                        ])
+                was_ready = ready_now
+                ready_now = (
+                    rng.random() < p_ready and not (is_cpu and state['halted'])
+                )
+                # a fault replaces ready: it is only raised against a request
+                # that is already waiting (so it is still there next cycle)
+                # and never against the final fetch or a write-back
+                # of the stack cache
+                faulting = (
+                    v and not was_ready and not state['halted']
+                    and addr != end_word
+                    and (is_cpu or not we) and rng.random() < p_fault
+                )
+                if faulting:
+                    ready_now = False
                 ctx.set(port.req.ready, ready_now)
+                ctx.set(fault, faulting)
                 if pending and pending[0][0] <= 0:
                     head = pending.pop(0)
                     ctx.set(port.resp.valid, 1)
@@ -67,8 +86,21 @@ def run_case(seed, n_instr=150):
                     ctx.set(port.resp.valid, 0)
         return target
 
-    sim.add_testbench(serve(dut.mem, rng.choice([1.0, 0.7, 0.4]), True), background=True)
-    sim.add_testbench(serve(dut.stack_mem, rng.choice([1.0, 0.7, 0.4]), False), background=True)
+    sim.add_testbench(
+        serve(dut.mem, dut.mem_fault, rng.choice([1.0, 0.7, 0.4]), True),
+        background=True
+    )
+    sim.add_testbench(
+        serve(dut.stack_mem, dut.stack_mem_fault, rng.choice([1.0, 0.7, 0.4]), False),
+        background=True
+    )
+
+    async def count_aborts(ctx):
+        while True:
+            await ctx.tick()
+            state['aborts'] += ctx.get(dut.aborted)
+
+    sim.add_testbench(count_aborts, background=True)
 
     async def bench(ctx):
         for _ in range(400000):
@@ -77,18 +109,26 @@ def run_case(seed, n_instr=150):
             await ctx.tick()
         else:
             raise AssertionError(f'seed {seed}: the program never finished')
-        for _ in range(300):                # let the stack cache drain
+        for _ in range(300):  # let the stack cache drain
             await ctx.tick()
+        if p_fault:
+            assert state['aborts'], f'seed {seed}: no fault was ever taken'
         flags = ctx.get(dut.sw) & 0x1f
-        assert flags == prog.ref.flags, f'seed {seed}: flags {flags:05b}, expected {prog.ref.flags:05b}'
+        assert flags == prog.ref.flags, (
+            f'seed {seed}: flags {flags:05b}, expected {prog.ref.flags:05b}'
+        )
         assert (ctx.get(dut.sfp), ctx.get(dut.rsp)) == (prog.ref.sfp, prog.ref.rsp), (
-            f'seed {seed}: SFP and RSP are {ctx.get(dut.sfp):#06x}, {ctx.get(dut.rsp):#06x}')
+            f'seed {seed}: SFP and RSP are {ctx.get(dut.sfp):#06x}, '
+            f'{ctx.get(dut.rsp):#06x}'
+        )
         for lo, hi in compare_ranges(prog):
             for a in range(lo, hi):
                 got = store.get(a, junk(2 * a))
                 want = prog.ref.w.get(a, junk(2 * a))
-                assert got == want, (f'seed {seed}: word at {2 * a:#06x} is {got:#06x}, '
-                                     f'expected {want:#06x}')
+                assert got == want, (
+                    f'seed {seed}: word at {2 * a:#06x} is {got:#06x}, '
+                    f'expected {want:#06x}'
+                )
 
     sim.add_testbench(bench)
     sim.run()
@@ -97,6 +137,8 @@ def run_case(seed, n_instr=150):
 def test_cpu_ldst():
     for seed in range(6):
         run_case(seed)
+    for seed in range(6, 12):  # restartable instructions: random memory faults
+        run_case(seed, p_fault=0.2)
     print('ok')
 
 
