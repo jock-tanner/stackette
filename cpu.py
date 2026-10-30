@@ -41,9 +41,11 @@ REG_SP = 4
 REG_NULL = 5
 REG_SR = 6
 REG_IP = 15
+
 # the status register bits that exist: C Z N V P. The others read as zero
 # and ignore writes.
 SR_MASK = 0b11111
+
 # unary operations, format 11 group 2: 11 10 00 dd s oooo 000
 UOP_NOT = 0
 UOP_NEG = 1
@@ -58,6 +60,7 @@ MISC_CALL_ABS = 5
 MISC_JMP_ABS = 6
 MISC_CALL_POP = 7
 MISC_RET_VAR = 9
+
 # The interrupt ID register tells the system context why it is running: the
 # class in bits 7:6, the number in bits 5:0.
 ID_RESET = 0 << 6   # power-up, the number is 0
@@ -68,6 +71,7 @@ FAULT_ILLEGAL = 0   # an instruction that does not exist, or RETI in user mode
 FAULT_MEM = 1       # a request of the CPU was refused
 FAULT_STACK = 2     # a fill of the stack cache was refused
 FAULT_WB = 3        # a write-back of the stack cache was refused (asynchronous)
+
 # the registers of the inactive context and the exception data, as the CPU
 # shows them on its `ctx_*` port (word numbers)
 CTX_IP = 0
@@ -105,6 +109,7 @@ class CPU(Component):
     # drives. Writes go to the inactive context only; the registers after
     # CTX_PSP are read only.
     user: Out(1)
+
     # high while the system context is being reset (a soft reset), so that
     # the MMU puts the default map back into its system registers
     soft_reset: Out(1)
@@ -113,12 +118,8 @@ class CPU(Component):
     ctx_wdata: In(16)
     ctx_rdata: Out(16)
 
-    # for display purpose
-    high_addr: Out(4)
-
-    def __init__(self, *, crawl=0xfff, user_ip_init=IP_INIT):
+    def __init__(self, *, user_ip_init=IP_INIT):
         super().__init__()
-        self.crawl = crawl
         self.user_ip_init = user_ip_init
 
     def elaborate(self, platform):
@@ -142,6 +143,7 @@ class CPU(Component):
         mbp = Signal(16)
         midx = Signal(16)
         sw = Signal(16)
+
         # the inactive context. RETI and TRAP (and the exceptions) exchange
         # it with the registers above; PSP lives in the stack cache.
         b_ip = Signal(16, init=self.user_ip_init)
@@ -153,14 +155,17 @@ class CPU(Component):
         b_psp = Signal(16, init=PSP_INIT)
         user = Signal()
         m.d.comb += self.user.eq(user)
+
         # why the system context runs, and what is known about an exception
         intr_id = Signal(16, init=ID_RESET)
         fault_ip = Signal(16)       # where the instruction that failed starts
         fault_addr = Signal(16)     # the byte address of the refused request
         exc_code = Signal(16)       # the ID to be delivered
+
         # a refused write-back of the stack cache, until it is taken
         pend_wb = Signal()
         wb_addr = Signal(16)
+
         # visible to testbenches
         self.intr_id = intr_id
         self.sw = sw
@@ -177,13 +182,11 @@ class CPU(Component):
         istart = Signal(16, init=IP_INIT)   # where the instruction being
                                             # executed starts (for a skipped
                                             # one, the SKIP before it)
+
         # set by SKIP: the next instruction is fetched but not executed
         skipping = Signal()
 
         m.d.comb += self.space.eq(Space.CODE)
-
-        # only for display
-        m.d.comb += self.high_addr.eq(ip[12:])
 
         # decode
         fmt = instr[14:16]
@@ -200,22 +203,27 @@ class CPU(Component):
         is_ld = (op == OP_LD) & (fmt != 3)
         is_st = (op == OP_ST) & (fmt != 3) & (fmt != FMT_IMM8)
         is_alu = (op < OP_LD) & (fmt != 3)
+
         # AND OR XOR BIC; only looked at for ALU ops, so one bit is enough
         is_logic = op[2]
+
         # control format 11: BRA, CALL rel11, ADDP, and the misc group
         is_ctl = fmt == 3
         grp = instr[12:14]
         misc_op = instr[6:11]
         is_bra = is_ctl & (grp == 0) & ~instr[11]
         is_skip = is_ctl & (grp == 0) & instr[11] & ~instr[10]
+
         # SETB and CLRB: 11 01 00 0o iiiiiiii
         is_setclr = is_ctl & (grp == 1) & (instr[10:12] == 0) & ~instr[9]
         is_addp = is_ctl & (grp == 1) & (instr[10:12] == 1) & (instr[8:10] != 3)
+
         # unary operations: 11 10 00 dd s oooo 000, `dd` and `s` as usual
         is_unary = is_ctl & (grp == 2) & (instr[10:12] == 0)
         u_op = instr[3:7]
         is_call_rel = is_ctl & (grp == 3) & ~instr[11]
         is_misc = is_ctl & (grp == 3) & instr[11]
+
         # RET #n drops n argument words; RET takes the count from the frame
         is_ret_n = is_misc & (misc_op == MISC_RET_N)
         is_ret_var = is_misc & (misc_op == MISC_RET_VAR)
@@ -242,6 +250,7 @@ class CPU(Component):
         ok_ld = is_ld & ~(is_gen & (mode == 7))
         ok_st = is_st & ~(is_gen & ((mode == MODE_IMM16) | (mode == 7)))
         ok_alu = is_alu & ~(is_gen & (mode == 7))
+
         # SXT and BSWAP are word operations
         ok_unary = (
                 is_unary & (u_op < 6)
@@ -456,6 +465,7 @@ class CPU(Component):
         # remove NOS. Arithmetic ops set C Z N V P, logical ops only Z N P.
         # A byte result is zero-extended into the destination word.
         m.submodules.alu = alu = ALU()
+
         # the destination item: TOS for dd 0 and 3, NOS for dd 1 and 2. The
         # unary operations use the same item as their operand.
         alu_pos = Signal(2)
@@ -502,9 +512,6 @@ class CPU(Component):
                     m.d.comb += alu.op_code.eq(OpCodes.RRC)
         with m.Else():
             m.d.comb += alu.op_code.eq(Cat(op[:2], C(0), op[2]))
-
-        # delay for display purpose
-        after = 'WAIT' if self.crawl else 'FETCH'
 
         # ---- restartable instructions ----
         # An instruction may be abandoned when a memory request or a fill of
@@ -623,7 +630,7 @@ class CPU(Component):
                         m.next = 'EXTRA'
                     with m.Else():
                         m.d.sync += skipping.eq(0)
-                        m.next = after
+                        m.next = 'FETCH'
                 with m.Elif(~ok):
                     abort(ID_FAULT | FAULT_ILLEGAL)
                 with m.Elif(needs_extra):
@@ -653,7 +660,7 @@ class CPU(Component):
                     ]
                     with m.If(skipping):
                         m.d.sync += skipping.eq(0)
-                        m.next = after
+                        m.next = 'FETCH'
                     with m.Else():
                         m.next = 'EXEC'
 
@@ -672,24 +679,24 @@ class CPU(Component):
                     m.next = 'ST_POP'
                 with m.Elif(is_bra | is_jmp_abs):
                     m.d.sync += ip.eq(tgt)
-                    m.next = after
+                    m.next = 'FETCH'
                 with m.Elif(is_skip):
                     m.d.sync += skipping.eq(cond)
-                    m.next = after
+                    m.next = 'FETCH'
                 with m.Elif(is_setclr):
                     with m.If(instr[8]):
                         m.d.sync += sw.eq(sw & ~(instr[0:8] & SR_MASK))
                     with m.Else():
                         m.d.sync += sw.eq(sw | (instr[0:8] & SR_MASK))
-                    m.next = after
+                    m.next = 'FETCH'
                 with m.Elif(is_addp):
                     with m.Switch(instr[8:10]):
                         with m.Case(0):
                             m.d.sync += mbp.eq(mbp + addp_i)
-                            m.next = after
+                            m.next = 'FETCH'
                         with m.Case(1):
                             m.d.sync += midx.eq(midx + addp_i)
-                            m.next = after
+                            m.next = 'FETCH'
                         with m.Case(2):
                             m.next = 'ADDP_SP'
                 with m.Elif(is_call_pop):
@@ -708,7 +715,7 @@ class CPU(Component):
                     ]
                     enter_system()
                 with m.Else():
-                    m.next = after
+                    m.next = 'FETCH'
 
             # ---- LD: memory source ----
             # keep the cache coherent with the read: flush if the address is
@@ -791,7 +798,7 @@ class CPU(Component):
                     # the commit: MIDX steps for the post-increment and
                     # pre-decrement modes
                     m.d.sync += midx.eq(midx_next)
-                    m.next = after
+                    m.next = 'FETCH'
 
             # ---- ALU: result and flags in one cache command ----
             # the write uses the numbering before the shift: dd 2 writes NOS
@@ -840,7 +847,7 @@ class CPU(Component):
                         m.d.sync += sw[0].eq(alu.carry)
                     with m.If(set_v):
                         m.d.sync += sw[3].eq(alu.overflow)
-                    m.next = after
+                    m.next = 'FETCH'
 
             # ---- ADDP SP: the same as storing to SP ----
             with m.State('ADDP_SP'):
@@ -850,7 +857,7 @@ class CPU(Component):
                     cmd.arg.eq(stack.psp + addp_i),
                 ]
                 with m.If(cmd.ready):
-                    m.next = after
+                    m.next = 'FETCH'
 
             # ---- CALL ----
             # The return address goes on the return stack, the caller's SFP
@@ -901,7 +908,7 @@ class CPU(Component):
                         sfp.eq(stack.psp - 2),
                         ip.eq(tgt),
                     ]
-                    m.next = after
+                    m.next = 'FETCH'
 
             # ---- RET ----
             # Reads the saved SFP (and for the variadic RET the count) from the
@@ -998,7 +1005,7 @@ class CPU(Component):
                         sfp.eq(link),
                         rsp.eq(rsp + 2),
                     ]
-                    m.next = after
+                    m.next = 'FETCH'
 
             # ---- ST: take the value off the stack ----
             with m.State('ST_POP'):
@@ -1032,20 +1039,20 @@ class CPU(Component):
                             m.next = 'ST_STK'
                         with m.Case(REG_MBP):
                             m.d.sync += mbp.eq(val_sz)
-                            m.next = after
+                            m.next = 'FETCH'
                         with m.Case(REG_MIDX):
                             m.d.sync += midx.eq(val_sz)
-                            m.next = after
+                            m.next = 'FETCH'
                         with m.Case(REG_SP):
                             m.next = 'ST_SP'
                         with m.Case(REG_SR):
                             m.d.sync += sw.eq(val_sz & SR_MASK)
-                            m.next = after
+                            m.next = 'FETCH'
                         with m.Case(REG_IP):
                             m.d.sync += ip.eq(val_sz)
-                            m.next = after
+                            m.next = 'FETCH'
                         with m.Default():
-                            m.next = after
+                            m.next = 'FETCH'
                 with m.Elif(sp_stack):
                     m.next = 'ST_STK'
                 with m.Else():
@@ -1067,7 +1074,7 @@ class CPU(Component):
                     with m.Else():
                         stack_refused()
                 with m.Elif(cmd.ready):
-                    m.next = after
+                    m.next = 'FETCH'
 
             with m.State('ST_SP'):
                 m.d.comb += [
@@ -1076,7 +1083,7 @@ class CPU(Component):
                     cmd.arg.eq(val_sz),
                 ]
                 with m.If(cmd.ready):
-                    m.next = after
+                    m.next = 'FETCH'
 
             # memory destination: as for LD, but the stores must also drop the
             # cached copy
@@ -1112,7 +1119,7 @@ class CPU(Component):
                         mem_refused()
                 with m.Elif(req.ready):
                     m.d.sync += midx.eq(midx_next)
-                    m.next = after
+                    m.next = 'FETCH'
 
             # ---- abandoning an instruction ----
             # ST and CALL pop the stack before their last access. Put the
@@ -1192,7 +1199,7 @@ class CPU(Component):
                     ]
                     with m.If(user):
                         m.d.sync += intr_id.eq(exc_code)
-                    m.next = after
+                    m.next = 'FETCH'
 
             # ---- soft reset: an exception in the system context ----
             # the system context gets its power-up values (the user context
@@ -1225,17 +1232,7 @@ class CPU(Component):
                     cmd.arg.eq(PSP_INIT),
                 ]
                 with m.If(cmd.ready):
-                    m.next = after
-
-            if self.crawl:
-                # delay for display purpose
-                wait_cnt = Signal(12, init=self.crawl)
-                with m.State('WAIT'):
-                    with m.If(wait_cnt == 0):
-                        m.d.sync += wait_cnt.eq(self.crawl)
-                        m.next = 'FETCH'
-                    with m.Else():
-                        m.d.sync += wait_cnt.eq(wait_cnt - 1)
+                    m.next = 'FETCH'
 
         # ---- the context port ----
         ctx_regs = Array([
@@ -1275,7 +1272,6 @@ class CPU(Component):
 class CPUTop(Elaboratable):
     def elaborate(self, platform):
         from amaranth.build import Pins, Resource
-        from amaranth_boards.de0nano import DE0NanoPlatform
 
         from de0nano_sdram import DE0NanoSDRAM
         from de0nano_spi_flash import DE0NanoSPIFlash
@@ -1301,13 +1297,6 @@ class CPUTop(Elaboratable):
         tx_pin = platform.request('tx')
         rx_pin = platform.request('rx')
         m.d.comb += [tx_pin.o.eq(uart.pins.tx), uart.pins.rx.eq(rx_pin.i)]
-
-        m.d.comb += [
-            platform.request('led', 0).o.eq(system.high_addr[0]),
-            platform.request('led', 1).o.eq(system.high_addr[1]),
-            platform.request('led', 2).o.eq(system.high_addr[2]),
-            platform.request('led', 3).o.eq(system.high_addr[3]),
-        ]
 
         return m
 

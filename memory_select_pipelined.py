@@ -27,12 +27,16 @@ class MemorySelectPipelined(MemorySelect):
         sel = self.decode(m)
         sel_flash, sel_ram, sel_periph = sel
 
-        pend = Signal(4)                # reads accepted, response not yet seen
-        cur = Signal(3)                 # one-hot: target those reads went to
+        pend = Signal(4)  # reads accepted, response not yet seen
+        cur = Signal(3)  # one-hot: target those reads went to
         same = Signal()
-        gate = Signal()                 # this request may go out now
+        gate = Signal()  # this request may go out now
         m.d.comb += [
-            same.eq((cur[0] & sel_flash) | (cur[1] & sel_ram) | (cur[2] & sel_periph)),
+            same.eq(
+                (cur[0] & sel_flash)
+                | (cur[1] & sel_ram)
+                | (cur[2] & sel_periph)
+            ),
             gate.eq(cpu.we | (pend == 0) | (same & (pend != MAX_OUTSTANDING))),
         ]
         resp_valid = self.connect(m, sel, gate)

@@ -20,7 +20,7 @@ from amaranth.sim import Simulator
 from asm.asm import assemble
 from system import System
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def serve(port, store, rng, p_ready, uart=None):
@@ -61,7 +61,7 @@ def serve(port, store, rng, p_ready, uart=None):
 
 
 def assembled(name):
-    with open(os.path.join(HERE, 'hwtest', name)) as f:
+    with open(os.path.join(ROOT, 'hwtest', name)) as f:
         words, _ = assemble(f.read())
     return {i: w for i, w in enumerate(words)}
 
@@ -71,7 +71,7 @@ def run_program(name, seed, n_cycles, p_ready):
     flash = assembled(name)
     ram = {}
     uart = []
-    dut = System(crawl=0)
+    dut = System()
     sim = Simulator(dut)
     sim.add_clock(1e-6)
     sim.add_testbench(serve(dut.flash, flash, rng, p_ready), background=True)
@@ -93,8 +93,11 @@ def test_cpu_modes():
     expected = b'ABCBCDEFGHSITJ'
     for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
         out, seen = run_program('hw7_modes.asm', seed, 6000, p_ready)
-        assert out == expected, f'seed {seed}: the output is {out!r}, expected {expected!r}'
-        # the illegal 0xffff and RETI of the user, the illegal 0xffff of the system
+        assert out == expected, (
+            f'seed {seed}: the output is {out!r}, expected {expected!r}'
+        )
+        # the illegal 0xffff and RETI of the user,
+        # the illegal 0xffff of the system
         assert seen['aborts'] == 3, seen
     # the MMU: pages mapped for the user, a page with no memory, the soft reset
     for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):

@@ -24,12 +24,21 @@ OP_ADD, OP_ADC, OP_SUB, OP_SBC, OP_AND, OP_OR, OP_XOR, OP_BIC = range(8)
 OP_LD = 8
 OP_ST = 9
 U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC = range(6)
-REG_TOS, REG_NOS, REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_SR, REG_IP = 0, 1, 2, 3, 4, 5, 6, 15
+REG_TOS = 0
+REG_NOS = 1
+REG_MBP = 2
+REG_MIDX = 3
+REG_SP = 4
+REG_NULL = 5
+REG_SR = 6
+REG_IP = 15
 SR_MASK = 0x1f
 
 
 def junk(byte_addr):
-    """Contents of memory nobody has written (the same for model and CPU test)."""
+    """
+    Contents of memory nobody has written (the same for model and CPU test).
+    """
     return (byte_addr * 2654435761 >> 7) & 0xffff
 
 
@@ -54,7 +63,11 @@ def i_gen(op, dd, s, mode, x, extra=None):
 
 
 # control format 11
-MISC_RET_N, MISC_CALL_ABS, MISC_JMP_ABS, MISC_CALL_POP, MISC_RET_VAR = 1, 5, 6, 7, 9
+MISC_RET_N = 1
+MISC_CALL_ABS = 5
+MISC_JMP_ABS = 6
+MISC_CALL_POP = 7
+MISC_RET_VAR = 9
 
 
 def i_bra(rel):
@@ -271,7 +284,8 @@ class Ref:
         raise AssertionError('reference run does not finish')
 
     def unary(self, op, dd, s):
-        # the operand is the item the ALU ops use: TOS for dd 0 and 3, NOS for 1 and 2
+        # the operand is the item the ALU ops use: TOS for dd 0 and 3,
+        # NOS for 1 and 2
         pos = (dd & 1) ^ (dd >> 1)
         bits = 8 if s else 16
         mask = (1 << bits) - 1
@@ -323,7 +337,12 @@ class Ref:
             self.c = full >> bits & 1
             self.v = int(not -(1 << (bits - 1)) <= signed < (1 << (bits - 1)))
         else:
-            r = {OP_AND: a & b, OP_OR: a | b, OP_XOR: a ^ b, OP_BIC: a & ~b & mask}[op]
+            r = {
+                OP_AND: a & b,
+                OP_OR: a | b,
+                OP_XOR: a ^ b,
+                OP_BIC: a & ~b & mask,
+            }[op]
         self.z = int(r == 0)
         self.n = r >> (bits - 1) & 1
         self.p = int(bin(r).count('1') % 2 == 0)
@@ -344,8 +363,16 @@ class Ref:
         mode = (w >> 4) & 7
         x = w & 15
         if mode == 0:
-            regs = {REG_TOS: self.item(0), REG_NOS: self.item(1), REG_MBP: self.mbp,
-                    REG_MIDX: self.midx, REG_SP: self.psp, REG_NULL: 0, REG_SR: self.flags, REG_IP: next_ip}
+            regs = {
+                REG_TOS: self.item(0),
+                REG_NOS: self.item(1),
+                REG_MBP: self.mbp,
+                REG_MIDX: self.midx,
+                REG_SP: self.psp,
+                REG_NULL: 0,
+                REG_SR: self.flags,
+                REG_IP: next_ip,
+            }
             return regs[x] & (0xff if s else 0xffff)
         if mode in (1, 2, 3):
             ea = self.ea_ptr(mode, s)
@@ -358,7 +385,7 @@ class Ref:
             return words[1] & (0xff if s else 0xffff)
         if mode == 5:
             return self.rd(words[1], s)
-        return self.rd((self.psp + 2 * x) & 0xffff, s)      # mode 6
+        return self.rd((self.psp + 2 * x) & 0xffff, s)  # mode 6
 
     def ld_put(self, dd, v):
         if dd == 0:
@@ -416,10 +443,12 @@ class Program:
         self.words = []
         self.ref = Ref()
         self.depth = 0
+
         # while False the instructions are only collected (a function body
         # is executed later, from a call)
         self.live = True
         self.max_depth = MAX_DEPTH
+
         # inside a function: (argument words above the link, variadic)
         self.frame = None
         self.funcs = []
@@ -433,7 +462,9 @@ class Program:
         self.depth += delta
         if self.live:
             self.ref.step(ins, self.addr)
-            assert self.depth == (PSP0 - self.ref.psp) // 2, (self.depth, self.ref.psp)
+            assert self.depth == (PSP0 - self.ref.psp) // 2, (
+                self.depth, self.ref.psp
+            )
 
     def emit_call(self, ins, delta):
         self.words += ins
@@ -441,7 +472,9 @@ class Program:
         if self.live:
             target = self.ref.step(ins, self.addr)
             self.ref.run(self.words, target, self.addr)
-            assert self.depth == (PSP0 - self.ref.psp) // 2, (self.depth, self.ref.psp)
+            assert self.depth == (PSP0 - self.ref.psp) // 2, (
+                self.depth, self.ref.psp
+            )
 
     def push_imm8(self, v):
         self.emit(i_imm8(OP_LD, 2, v), 1)
@@ -489,7 +522,9 @@ class Program:
         return r.choice([FAR + r.randrange(0x100), TOP + r.randrange(0x60)])
 
     def src_ins(self, op, dd, s, d):
-        """A random instruction `op` with a source operand; d = depth before it."""
+        """
+        A random instruction `op` with a source operand; d = depth before it.
+        """
         r = self.rng
         kind = r.choice(['imm8', 'reg', 'imm16', 'pfp', 'ptr', 'abs', 'sp'])
         if kind == 'imm8':
@@ -504,7 +539,14 @@ class Program:
         if kind == 'imm16':
             return i_gen(op, dd, s, 4, 0, r.getrandbits(16))
         if kind == 'pfp':
-            return i_pfp(op, dd, s, r.randrange(-min(d, 64), 64 if self.frame is None else self.frame[0] + 1))
+            return i_pfp(
+                op,
+                dd,
+                s,
+                r.randrange(
+                    -min(d, 64), 64 if self.frame is None else self.frame[0] + 1
+                )
+            )
         if kind == 'ptr':
             return i_gen(op, dd, s, r.choice([1, 2, 3]), s and r.getrandbits(1))
         if kind == 'abs':
@@ -560,13 +602,20 @@ class Program:
         return True
 
     def pfp_store(self, d):
-        """A word offset for a store relative to PFP, or None. In a function it must not
-        hit the saved PFP or the count: only the stack items below PFP and the arguments."""
+        """
+        A word offset for a store relative to PFP, or None. In a function
+        it must not hit the saved PFP or the count: only the stack items
+        below PFP and the arguments.
+        """
         r = self.rng
         if self.frame is None:
             return r.randrange(-min(d, 64), 64)
         words, variadic = self.frame
-        cands = list(range(-min(d, 64), 0)) + list(range(2 if variadic else 1, words + 1))
+        cands = list(
+            range(-min(d, 64), 0)
+        ) + list(
+            range(2 if variadic else 1, words + 1)
+        )
         return r.choice(cands) if cands else None
 
     def st_one(self, neutral=False):
@@ -575,7 +624,9 @@ class Program:
         if not dds:
             return False
         dd = r.choice(dds)
-        d = self.depth - (1 if dd >= 2 else 0)     # depth when the destination is evaluated
+
+        # depth when the destination is evaluated
+        d = self.depth - (1 if dd >= 2 else 0)
         s = r.getrandbits(1)
         kinds = ['pfp', 'ptr', 'abs', 'null', 'sr']
         if d >= 1:
@@ -605,7 +656,9 @@ class Program:
         return True
 
     def block_set_sp(self):
-        """push SP, then pop it back into SP: PSP unchanged, but a full SET_PSP."""
+        """
+        Push SP, then pop it back into SP: PSP unchanged, but a full SET_PSP.
+        """
         self.emit(i_gen(OP_LD, 2, 0, 0, REG_SP), 1)
         self.emit(i_gen(OP_ST, 2, 0, 0, REG_SP), -1)
 
@@ -625,18 +678,29 @@ class Program:
             mode = r.choice([1, 2, 3]) if j >= 1 else r.choice([1, 2])
             if r.random() < 0.4:
                 dd = r.choice([0, 1, 2, 3])
-                self.emit(i_gen(r.randrange(OP_ADD, OP_BIC + 1), dd, s, mode, s and r.getrandbits(1)),
-                          -1 if dd >= 2 else 0)
+                self.emit(
+                    i_gen(
+                        r.randrange(OP_ADD, OP_BIC + 1),
+                        dd, s, mode, s and r.getrandbits(1)
+                    ), -1 if dd >= 2 else 0
+                )
             else:
                 dd = r.choice(self.ld_dds())
-                self.emit(i_gen(OP_LD, dd, s, mode, s and r.getrandbits(1)), 1 if dd >= 2 else 0)
+                self.emit(
+                    i_gen(
+                        OP_LD, dd, s, mode, s and r.getrandbits(1)
+                    ), 1 if dd >= 2 else 0
+                )
         else:
             dds = [dd for dd in self.st_dds() if dd < 2 or j >= 1]
             if not dds:
                 self.set_far()
                 return True
             dd = r.choice(dds)
-            mode = r.choice([1, 2, 3]) if j >= 2 or (dd < 2 and j >= 1) else r.choice([1, 2])
+            if j >= 2 or (dd < 2 and j >= 1):
+                mode = r.choice([1, 2, 3])
+            else:
+                mode = r.choice([1, 2])
             self.emit(i_gen(OP_ST, dd, s, mode, 0), -1 if dd >= 2 else 0)
         self.set_far()
         return True
@@ -652,8 +716,10 @@ class Program:
         self.words += [r.getrandbits(16) for _ in range(k)]
 
     def block_skip_cc(self):
-        """SKIP cc and an instruction that does not change the stack depth, so that
-        the depth is the same whether it runs or not."""
+        """
+        SKIP cc and an instruction that does not change the stack depth,
+        so that the depth is the same whether it runs or not.
+        """
         r = self.rng
         if self.depth < 1:
             return
@@ -675,7 +741,10 @@ class Program:
         self.live = live
 
     def emit_plain(self, ins):
-        """Instructions the reference does not execute here: the jump skips the junk."""
+        """
+        Instructions the reference does not execute here:
+        the jump skips the junk.
+        """
         self.words += ins
 
     def call_func(self, func):
@@ -711,7 +780,8 @@ class Program:
         self.live, self.depth, self.max_depth = False, 0, 12
         self.frame = (words, variadic)
         if n_locals:
-            # the locals are the top stack items: reserve them, then give each a value
+            # the locals are the top stack items: reserve them,
+            # then give each a value
             self.emit(i_addp(2, -2 * n_locals), n_locals)
             for k in range(n_locals):
                 self.push_imm8(r.getrandbits(8))
@@ -729,35 +799,41 @@ class Program:
     def random_op(self, allow_calls):
         r = self.rng
         x = r.random()
-        if x < 0.04:
-            self.block_set_sp()
-        elif x < 0.14:
-            self.block_alias()
-        elif x < 0.34:
-            while not self.ld_one():
-                pass
-        elif x < 0.50:
-            while not self.alu_one():
-                self.ld_one()
-        elif x < 0.58 and allow_calls and self.funcs and self.depth + 6 <= self.max_depth:
-            func = r.choice(self.funcs)
-            if func[3] <= 8 or (self.frame is None and self.depth <= 4):
-                self.call_func(func)
-        elif x < 0.62:
-            self.block_skip()
-        elif x < 0.70:
-            self.block_skip_cc()
-        elif x < 0.74:
-            self.emit(r.choice([i_setb, i_clrb])(r.getrandbits(8)))
-        elif x < 0.80:
-            if not self.unary_one():
-                self.ld_one()
-        else:
-            while not self.st_one():
-                self.ld_one()
+        match x:
+            case x if x < 0.04:
+                self.block_set_sp()
+            case x if x < 0.14:
+                self.block_alias()
+            case x if x < 0.34:
+                while not self.ld_one():
+                    pass
+            case x if x < 0.50:
+                while not self.alu_one():
+                    self.ld_one()
+            case x if (
+                x < 0.58 and allow_calls
+                and self.funcs
+                and self.depth + 6 <= self.max_depth
+            ):
+                func = r.choice(self.funcs)
+                if func[3] <= 8 or (self.frame is None and self.depth <= 4):
+                    self.call_func(func)
+            case x if x < 0.62:
+                self.block_skip()
+            case x if x < 0.70:
+                self.block_skip_cc()
+            case x if x < 0.74:
+                self.emit(r.choice([i_setb, i_clrb])(r.getrandbits(8)))
+            case x if x < 0.80:
+                if not self.unary_one():
+                    self.ld_one()
+            case _:
+                while not self.st_one():
+                    self.ld_one()
 
     def build(self, n):
         r = self.rng
+
         # code layout: JMP main, the functions, then main
         self.live = False
         p = len(self.prefix)

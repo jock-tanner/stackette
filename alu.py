@@ -21,6 +21,7 @@ class OpCodes(Enum, shape=4):
     # word only
     SXT = 0b1101
     BSWAP = 0b1110
+
     # rotate right through carry, sets carry to the bit that fell out
     RRC = 0b1111
 

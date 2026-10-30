@@ -56,9 +56,9 @@ class MemoryArbiter(Component):
         resps = [getattr(self, f'port{i}').resp for i in range(n)]
         spaces = [getattr(self, f'space{i}') for i in range(n)]
 
-        busy = Signal()                 # a read is waiting for its answer
-        owner = Signal(range(n))        # ... and this initiator issued it
-        free = Signal()                 # a read may go out now
+        busy = Signal()           # a read is waiting for its answer
+        owner = Signal(range(n))  # ... and this initiator issued it
+        free = Signal()           # a read may go out now
         m.d.comb += free.eq(~busy | mem.resp.valid)
 
         # ---- fixed-priority grant ----

@@ -41,8 +41,6 @@ class System(wiring.Component):
     flash: Out(MemoryPort(FLASH_ADDR_WIDTH))
     ram: Out(MemoryPort(HOST_ADDR_WIDTH))
     uart: Out(MemoryPort(UART_ADDR_WIDTH))
-    # for display purpose
-    high_addr: Out(4)
 
     def __init__(self, **cpu_kwargs):
         super().__init__()
@@ -94,5 +92,4 @@ class System(wiring.Component):
             ctx_dev.ctx_rdata.eq(cpu.ctx_rdata),
         ]
 
-        m.d.comb += self.high_addr.eq(cpu.high_addr)
         return m

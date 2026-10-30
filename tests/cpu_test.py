@@ -19,14 +19,14 @@ two-word system context stub, see STUB). With random faults of the memory
 only the user context is used: each fault makes the stub run and then the
 program goes on from the instruction that failed, which has to leave no trace.
 
-Run with `python test_cpu_ldst.py` (or pytest). Needs cpu_ldst_model.py.
+Run with `python test_cpu_ldst.py` (or pytest). Needs cpu_model.py.
 """
 import random
 
 from amaranth.sim import Simulator
 
 from cpu import CPU
-from cpu_ldst_model import Program, compare_ranges, junk
+from cpu_model import Program, compare_ranges, junk
 
 # the system context for a program in the user context: RETI, and a branch
 # back to it (the system context carries on after its RETI). Every exception
@@ -42,7 +42,7 @@ def run_case(seed, n_instr=150, p_fault=0.0, user=False):
     end_word = prog.end >> 1
     store = {i: w for i, w in enumerate(prog.words)}
     state = {'halted': False, 'aborts': 0}
-    dut = CPU(crawl=0, user_ip_init=2 * len(STUB) if user else 0)
+    dut = CPU(user_ip_init=2 * len(STUB) if user else 0)
     sim = Simulator(dut)
     sim.add_clock(1e-6)
 

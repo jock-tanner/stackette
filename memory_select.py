@@ -48,12 +48,13 @@ from sdram_controller import HOST_ADDR_WIDTH
 from spi_flash import FLASH_ADDR_WIDTH
 from uart import UART_ADDR_WIDTH
 
-CPU_ADDR_WIDTH = 15                 # 16-bit byte address -> 15-bit word address
-PHYS_ADDR_WIDTH = 27                # 28-bit byte address -> 27-bit word address
-PAGE_WORD_BITS = 11                 # a page is 4 KiB: 2048 words
+CPU_ADDR_WIDTH = 15  # 16-bit byte address -> 15-bit word address
+PHYS_ADDR_WIDTH = 27  # 28-bit byte address -> 27-bit word address
+PAGE_WORD_BITS = 11  # a page is 4 KiB: 2048 words
+
 # physical page numbers (the top 16 bits of the physical byte address)
-FLASH_PAGE = 0x2000                 # the first page of the flash
-PERIPH_PAGE = 0x8000                # the first page of the peripherals
+FLASH_PAGE = 0x2000  # the first page of the flash
+PERIPH_PAGE = 0x8000  # the first page of the peripherals
 
 class Space(IntEnum, shape=2):
     CODE = 0
@@ -96,19 +97,21 @@ class MemorySelect(Component):
         cpu, resp = self.cpu.req, self.cpu.resp
         flash, ram, periph = self.flash, self.ram, self.periph
         sel_flash, sel_ram, sel_periph = sel
-        m.d.comb += self.fault.eq(cpu.valid & ~(sel_flash | sel_ram | sel_periph))
+        m.d.comb += self.fault.eq(
+            cpu.valid & ~(sel_flash | sel_ram | sel_periph)
+        )
 
         for i, t in enumerate([flash, ram, periph]):
             r = t.req
             valid = cpu.valid & sel[i] & gate
             if t is flash:
-                valid = valid & ~cpu.we                 # writes to flash are dropped
+                valid = valid & ~cpu.we  # writes to flash are dropped
             m.d.comb += [
                 r.valid.eq(valid),
                 r.we.eq(cpu.we),
                 r.byte_hi.eq(cpu.byte_hi),
                 r.byte_lo.eq(cpu.byte_lo),
-                r.addr.eq(cpu.addr),                    # zero-extended / truncated
+                r.addr.eq(cpu.addr),  # zero-extended / truncated
                 r.wdata.eq(cpu.wdata),
             ]
         m.d.comb += cpu.ready.eq(gate & (
@@ -118,7 +121,11 @@ class MemorySelect(Component):
         ))
         resp_valid = Signal()
         m.d.comb += [
-            resp_valid.eq(flash.resp.valid | ram.resp.valid | periph.resp.valid),
+            resp_valid.eq(
+                flash.resp.valid
+                | ram.resp.valid
+                | periph.resp.valid
+            ),
             resp.valid.eq(resp_valid),
             resp.data.eq(
                 (flash.resp.data & flash.resp.valid.replicate(16))

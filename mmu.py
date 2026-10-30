@@ -32,13 +32,17 @@ Everything else is a wire: a request goes through with its byte enables and
 data, ready, the response and the fault come back.
 """
 from amaranth import C, Cat, Module, Mux, Signal
-from amaranth.lib import wiring
 from amaranth.lib.memory import Memory
-from amaranth.lib.wiring import In, Out
+from amaranth.lib.wiring import Component, In, Out
 
 from memory_port import MemoryPort
 from memory_select import (
-    CPU_ADDR_WIDTH, FLASH_PAGE, PAGE_WORD_BITS, PERIPH_PAGE, PHYS_ADDR_WIDTH, Space,
+    CPU_ADDR_WIDTH,
+    FLASH_PAGE,
+    PAGE_WORD_BITS,
+    PERIPH_PAGE,
+    PHYS_ADDR_WIDTH,
+    Space,
 )
 
 REG_ADDR_WIDTH = 7
@@ -55,7 +59,7 @@ def default_page(index):
     return page
 
 
-class MMU(wiring.Component):
+class MMU(Component):
     cpu: In(MemoryPort(CPU_ADDR_WIDTH))
     space: In(Space)
     user: In(1)
@@ -97,7 +101,9 @@ class MMU(wiring.Component):
 
         # ---- the translation ----
         m.d.comb += [
-            translate.addr.eq(Cat(req.addr[PAGE_WORD_BITS:], self.space, self.user)),
+            translate.addr.eq(
+                Cat(req.addr[PAGE_WORD_BITS:], self.space, self.user)
+            ),
             out.valid.eq(req.valid & ~sweeping),
             out.we.eq(req.we),
             out.byte_hi.eq(req.byte_hi),
@@ -116,8 +122,12 @@ class MMU(wiring.Component):
         m.d.comb += [
             rreq.ready.eq(1),
             reading.addr.eq(rreq.addr),
-            merged[0:8].eq(Mux(rreq.byte_lo, rreq.wdata[0:8], reading.data[0:8])),
-            merged[8:16].eq(Mux(rreq.byte_hi, rreq.wdata[8:16], reading.data[8:16])),
+            merged[0:8].eq(
+                Mux(rreq.byte_lo, rreq.wdata[0:8], reading.data[0:8])
+            ),
+            merged[8:16].eq(
+                Mux(rreq.byte_hi, rreq.wdata[8:16], reading.data[8:16])
+            ),
         ]
         with m.If(sweeping):
             m.d.comb += [

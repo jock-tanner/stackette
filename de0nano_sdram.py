@@ -9,7 +9,9 @@ The CPU (or tester, or a cache in front of this) only sees `bus`, and only
 uses the "sync" domain this module creates. All platform.request() calls
 and pin polarity live here and in the Phy, nowhere else.
 """
-from amaranth import ClockDomain, ClockSignal, DomainRenamer, Module, ResetSignal, Signal
+from amaranth import (
+    ClockDomain, ClockSignal, DomainRenamer, Module, ResetSignal, Signal,
+)
 from amaranth.lib import wiring
 from amaranth.lib.wiring import In
 

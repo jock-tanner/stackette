@@ -127,7 +127,7 @@ class StackCommand(wiring.Signature):
             'maint':   Out(Maint),
             'shift':   Out(Shift),
             'need':    Out(4),
-            'arg':     Out(16),     # PUSH/PUSH_UNDER data, SET_PSP value
+            'arg':     Out(16),  # PUSH/PUSH_UNDER data, SET_PSP value
             'w0_en':   Out(1),
             'w0_pos':  Out(2),
             'w0_data': Out(16),
@@ -188,7 +188,9 @@ class StackCache(wiring.Component):
             hit0 = cmd.w0_en & (cmd.w0_pos == k)
             hit1 = cmd.w1_en & (cmd.w1_pos == k)
             m.d.comb += [
-                wd[k].eq(Mux(hit1, cmd.w1_data, Mux(hit0, cmd.w0_data, data[k]))),
+                wd[k].eq(
+                    Mux(hit1, cmd.w1_data,Mux(hit0, cmd.w0_data, data[k]))
+                ),
                 wv[k].eq(vld[k] | hit0 | hit1),
                 wr[k].eq(drt[k] | hit0 | hit1),
             ]
@@ -199,8 +201,12 @@ class StackCache(wiring.Component):
         is_under = Signal()
         m.d.comb += [
             is_stack.eq(cmd.maint == Maint.NONE),
-            is_push.eq((cmd.shift == Shift.PUSH) | (cmd.shift == Shift.PUSH_UNDER)),
-            is_under.eq((cmd.shift == Shift.PUSH_UNDER) | (cmd.shift == Shift.POP_UNDER)),
+            is_push.eq(
+                (cmd.shift == Shift.PUSH) | (cmd.shift == Shift.PUSH_UNDER)
+            ),
+            is_under.eq(
+                (cmd.shift == Shift.PUSH_UNDER) | (cmd.shift == Shift.POP_UNDER)
+            ),
         ]
 
         # Lines that must be fetched before the command can execute: operands
