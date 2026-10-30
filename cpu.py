@@ -23,6 +23,7 @@ OP_XOR = 0b0110
 OP_BIC = 0b0111
 OP_LD = 0b1000
 OP_ST = 0b1001
+OP_SWAP = 0b1010
 FMT_IMM8 = 0
 FMT_PFP = 1
 FMT_GEN = 2
@@ -101,6 +102,11 @@ class CPU(Component):
     mem_fault: In(1)
     stack_mem_fault: In(1)
     aborted: Out(1)     # one cycle, when an instruction has been abandoned
+
+    # SWAP reads a word and writes another one back to the same address; the
+    # memory is held for the CPU from the read to the write, so that nothing
+    # else (the stack cache) gets in between
+    mem_lock: Out(1)
 
     # The user flag tells which context is active: 0 system, 1 user. No
     # instruction can read it. The registers of the other context (IP, RSP,
@@ -183,6 +189,7 @@ class CPU(Component):
         extra = Signal(16)  # the word following the instruction
                             # (immediate value or absolute address)
         val = Signal(16)    # the operand in transit
+        swapval = Signal(16)    # SWAP: the stack item that goes to memory
         lane = Signal()     # address bit 0 of a byte load
         link = Signal(16)   # the caller's frame pointer, read by RET
         istart = Signal(16, init=IP_INIT)   # where the instruction being
@@ -209,6 +216,7 @@ class CPU(Component):
         is_ld = (op == OP_LD) & (fmt != 3)
         is_st = (op == OP_ST) & (fmt != 3) & (fmt != FMT_IMM8)
         is_alu = (op < OP_LD) & (fmt != 3)
+        is_swap = (op == OP_SWAP) & ((fmt == FMT_PFP) | (fmt == FMT_GEN))
 
         # AND OR XOR BIC; only looked at for ALU ops, so one bit is enough
         is_logic = op[2]
@@ -256,6 +264,8 @@ class CPU(Component):
         ok_ld = is_ld & ~(is_gen & (mode == 7))
         ok_st = is_st & ~(is_gen & ((mode == MODE_IMM16) | (mode == 7)))
         ok_alu = is_alu & ~(is_gen & (mode == 7))
+        # SWAP exchanges TOS or NOS with a word or a byte of memory
+        ok_swap = is_swap & ~dd[1] & mem_operand
 
         # SXT and BSWAP are word operations
         ok_unary = (
@@ -269,7 +279,7 @@ class CPU(Component):
                 # RETI is an illegal instruction in user mode
                 | (is_reti & ~user) | is_trap
         )
-        ok = ok_ld | ok_st | ok_alu | ok_ctl
+        ok = ok_ld | ok_st | ok_alu | ok_swap | ok_ctl
 
         size = Signal(2)  # value to step midx
         m.d.comb += size.eq(Mux(s, 1, 2))
@@ -392,8 +402,14 @@ class CPU(Component):
             wdata.eq(Mux(s, Cat(val[0:8], val[0:8]), val)),
         ]
 
+        # what SWAP writes: byte stores go to both lanes, like ST's
+        swap_wdata = Signal(16)
+        m.d.comb += swap_wdata.eq(
+            Mux(s, Cat(swapval[0:8], swapval[0:8]), swapval)
+        )
+
         # sign extension flag of byte loads through pointers
-        sx = ptr_mode & s & x[0]
+        sx = ptr_mode & s & x[0] & ~is_swap
         byte = Signal(8)
         m.d.comb += byte.eq(Mux(lane, resp.data[8:16], resp.data[0:8]))
 
@@ -684,6 +700,8 @@ class CPU(Component):
                         m.next = 'ALU_DELIVER'
                     with m.Else():
                         m.next = 'LD_DELIVER'
+                with m.Elif(is_swap):
+                    m.next = 'SWAP_TAKE'
                 with m.Elif(is_unary):
                     m.next = 'ALU_DELIVER'
                 with m.Elif(is_st):
@@ -733,10 +751,12 @@ class CPU(Component):
             # in the cached window, then wait until its write buffer is empty
             with m.State('LD_COH'):
                 with m.If(in_window):
-                    m.d.comb += [
-                        cmd.valid.eq(1),
-                        cmd.maint.eq(Maint.FLUSH),
-                    ]
+                    m.d.comb += cmd.valid.eq(1)
+                    # SWAP writes: the cached copy must go too
+                    with m.If(is_swap):
+                        m.d.comb += cmd.maint.eq(Maint.FLUSH_INVALIDATE)
+                    with m.Else():
+                        m.d.comb += cmd.maint.eq(Maint.FLUSH)
                     with m.If(cmd.ready):
                         m.next = 'LD_IDLE'
                 with m.Else():
@@ -754,6 +774,7 @@ class CPU(Component):
                     req.byte_hi.eq(byte_hi),
                     req.byte_lo.eq(byte_lo),
                     req.addr.eq(ea[1:]),
+                    self.mem_lock.eq(is_swap),
                 ]
                 with m.If(self.mem_fault):
                     mem_refused()
@@ -762,6 +783,7 @@ class CPU(Component):
                     m.next = 'LD_RD_WAIT'
 
             with m.State('LD_RD_WAIT'):
+                m.d.comb += self.mem_lock.eq(is_swap)
                 with m.If(resp.valid):
                     with m.If(s):
                         m.d.sync += val.eq(
@@ -771,8 +793,50 @@ class CPU(Component):
                         m.d.sync += val.eq(resp.data)
                     with m.If(is_alu):
                         m.next = 'ALU_DELIVER'
+                    with m.Elif(is_swap):
+                        m.next = 'SWAP_WR'
                     with m.Else():
                         m.next = 'LD_DELIVER'
+
+            # ---- SWAP ----
+            # TOS or NOS and a memory word exchange their values. The stack
+            # item is taken first (a cache command that waits until the line
+            # is there, and a refused fill abandons the instruction with
+            # nothing done), then the usual steps of a memory read: the
+            # cache is flushed and invalidated if it holds the address, and
+            # has to be idle. The read and the write that follows go out one
+            # after the other with `mem_lock` up (LD_RD, LD_RD_WAIT and
+            # SWAP_WR), and the cache is not given a command in between, so
+            # nothing else touches the memory. The word that was read then
+            # goes to the stack item like an LD does, which cannot fault
+            # because it needs no line from memory: so after the write
+            # nothing can abandon the instruction.
+            with m.State('SWAP_TAKE'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.need.eq(Mux(dd[0], 0b0010, 0b0001)),
+                ]
+                with m.If(stack.fault):
+                    stack_refused()
+                with m.Elif(cmd.ready):
+                    m.d.sync += swapval.eq(Mux(dd[0], stack.d1, stack.d0))
+                    m.next = 'LD_COH'
+
+            with m.State('SWAP_WR'):
+                data_space()
+                m.d.comb += [
+                    req.valid.eq(1),
+                    req.we.eq(1),
+                    req.byte_hi.eq(byte_hi),
+                    req.byte_lo.eq(byte_lo),
+                    req.addr.eq(ea[1:]),
+                    req.wdata.eq(swap_wdata),
+                    self.mem_lock.eq(1),
+                ]
+                with m.If(self.mem_fault):
+                    mem_refused()
+                with m.Elif(req.ready):
+                    m.next = 'LD_DELIVER'
 
             # ---- LD: put the value on the stack ----
             with m.State('LD_DELIVER'):

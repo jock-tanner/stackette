@@ -3,9 +3,9 @@ Test for the system and user contexts of cpu.py: TRAP, RETI, exceptions, soft
 reset, the context device, and the asynchronous fault of a write-back of the
 stack cache.
 
-hwtest/hw7_modes.asm, hw8_mmu.asm and hw9_irq.asm are run on the whole System
-(CPU, arbiter, MMU, memory select, peripheral bus with the context device, the
-MMU registers, the interrupt controller and the timer).
+hwtest/hw7_modes.asm, hw8_mmu.asm, hw9_irq.asm and hw10_swap.asm are run on
+the whole System (CPU, arbiter, MMU, memory select, peripheral bus with the
+context device, the MMU registers, the interrupt controller and the timer).
 The flash (holding the program) and the SDRAM are behavioral models with
 random ready and 1..4 cycles of read latency; the UART is a register that
 logs what is written to it. The test expects the programs' output.
@@ -78,14 +78,37 @@ def run_program(name, seed, n_cycles, p_ready):
     sim.add_testbench(serve(dut.flash, flash, rng, p_ready), background=True)
     sim.add_testbench(serve(dut.ram, ram, rng, p_ready), background=True)
     sim.add_testbench(serve(dut.uart, {}, rng, p_ready, uart), background=True)
-    seen = {'aborts': 0}
+    seen = {'aborts': 0, 'swaps': 0}
 
     async def bench(ctx):
         for _ in range(n_cycles):
             await ctx.tick()
             seen['aborts'] += ctx.get(dut.cpu.aborted)
 
+    # SWAP is atomic: a request of the RAM that is accepted while the CPU
+    # holds the memory is a read, and the next one is the write to the same
+    # address, with nothing else in between
+    async def atomic(ctx):
+        waiting = None
+        while True:
+            _, _, v, ready, we, addr, lock = await ctx.tick().sample(
+                dut.ram.req.valid, dut.ram.req.ready, dut.ram.req.we,
+                dut.ram.req.addr, dut.cpu.mem_lock)
+            if not (v and ready):
+                assert waiting is None or lock, 'the lock dropped too early'
+                continue
+            if waiting is not None:
+                assert lock and we and addr == waiting, (
+                    f'between the read and the write of a SWAP: {we} {addr}'
+                )
+                waiting = None
+                seen['swaps'] += 1
+            elif lock:
+                assert not we, 'a write that starts a SWAP'
+                waiting = addr
+
     sim.add_testbench(bench)
+    sim.add_testbench(atomic, background=True)
     sim.run()
     return bytes(uart), seen
 
@@ -104,6 +127,11 @@ def test_cpu_modes():
     for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
         out, seen = run_program('hw8_mmu.asm', seed, 8000, p_ready)
         assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
+    # SWAP: words, bytes, the stack as memory, a lock; atomic on the RAM
+    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+        out, seen = run_program('hw10_swap.asm', seed, 4000, p_ready)
+        assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
+        assert seen['swaps'] == 7, seen
     # the interrupts: the timer, the mask, between SKIP and what it skips
     for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
         out, seen = run_program('hw9_irq.asm', seed, 60000, p_ready)

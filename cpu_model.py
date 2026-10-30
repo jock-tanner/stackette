@@ -23,6 +23,7 @@ MAX_DEPTH = 40
 OP_ADD, OP_ADC, OP_SUB, OP_SBC, OP_AND, OP_OR, OP_XOR, OP_BIC = range(8)
 OP_LD = 8
 OP_ST = 9
+OP_SWAP = 10
 U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC = range(6)
 REG_TOS = 0
 REG_NOS = 1
@@ -175,6 +176,8 @@ class Ref:
             if fmt == 0 and op >= OP_AND:
                 b = w & 0xff
             self.alu(op, dd, b, s)
+        elif op == OP_SWAP and fmt != 0:
+            self.swap(words, fmt, s, dd)
         elif op == OP_ST and fmt != 0:
             v = self.item(dd & 1)
             if dd == 2:
@@ -401,6 +404,25 @@ class Ref:
             self.wr16(self.psp, top)
             self.wr16(self.psp + 2, v)
 
+    def swap(self, words, fmt, s, dd):
+        """TOS or NOS (dd 0, 1) and a memory word or byte exchange values."""
+        w = words[0]
+        old = self.item(dd)
+        mode = (w >> 4) & 7
+        if fmt == 1:
+            ea = (self.sfp + 2 * sext(w & 0x7f, 7)) & 0xffff
+        elif mode in (1, 2, 3):
+            ea = self.ea_ptr(mode, s)
+        elif mode == 5:
+            ea = words[1]
+        else:
+            ea = (self.psp + 2 * (w & 15)) & 0xffff     # mode 6, k >= 4
+        new = self.rd(ea, s)
+        self.wr(ea, s, old)
+        if fmt == 2 and mode in (1, 2, 3):
+            self.ptr_after(mode, s)
+        self.ld_put(dd, new)
+
     def st_dst(self, words, fmt, s, v):
         w = words[0]
         if fmt == 1:
@@ -599,6 +621,35 @@ class Program:
         op = r.randrange(6)
         s = 0 if op in (U_SXT, U_BSWAP) else r.getrandbits(1)
         self.emit(i_unary(op, dd, s), 1 if dd >= 2 else 0)
+        return True
+
+    def swap_one(self):
+        r = self.rng
+        d = self.depth
+        if d < 1:
+            return False
+        dd = r.choice([0, 1] if d >= 2 else [0])
+        s = r.getrandbits(1)
+        kinds = ['pfp', 'ptr', 'abs']
+        if d >= 5:
+            kinds.append('sp')
+        kind = r.choice(kinds)
+        if kind == 'pfp':
+            n = self.pfp_store(d)
+            if n is None:
+                kind = 'abs'
+            else:
+                self.emit(i_pfp(OP_SWAP, dd, s, n))
+                return True
+        if kind == 'ptr':
+            # the bit that makes a byte load sign-extending does nothing here
+            self.emit(
+                i_gen(OP_SWAP, dd, s, r.choice([1, 2, 3]), s and r.getrandbits(1))
+            )
+        elif kind == 'abs':
+            self.emit(i_gen(OP_SWAP, dd, s, 5, 0, self.addr_far()))
+        else:
+            self.emit(i_gen(OP_SWAP, dd, s, 6, r.randrange(4, min(d, 16))))
         return True
 
     def pfp_store(self, d):
@@ -826,6 +877,9 @@ class Program:
                 self.emit(r.choice([i_setb, i_clrb])(r.getrandbits(8)))
             case x if x < 0.80:
                 if not self.unary_one():
+                    self.ld_one()
+            case x if x < 0.86:
+                if not self.swap_one():
                     self.ld_one()
             case _:
                 while not self.st_one():

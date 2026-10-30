@@ -13,6 +13,13 @@ Syntax, one instruction per line; `;` starts a comment, `name:` defines a label:
     add adc sub sbc and or xor bic  DD, SRC
                         DD: tos, nos, push, under; takes SRC like ld
     ld.b / st.b         8-bit access (ld.bs: byte load, sign-extended)
+    swap DD, MEM        DD: tos, nos; MEM: [pfp+n], [mbp+midx] (with + or -
+                        for the post-increment and pre-decrement forms),
+                        [abs], [sp+k] with k >= 4. TOS or NOS and the memory
+                        word exchange their values, and nothing else uses the
+                        memory between the read and the write (a lock, for a
+                        semaphore). swap.b exchanges a byte, zero-extended
+                        into the stack item. The flags are not changed.
 
     .word EXPR, ...     raw 16-bit words
 
@@ -80,7 +87,7 @@ REGS = {'tos': 0, 'nos': 1, 'mbp': 2, 'midx': 3, 'sp': 4, 'null': 5, 'sr': 6, 'i
 LD_DD = {'tos': 0, 'nos': 1, 'push': 2, 'under': 3}
 ST_DD = {'tos': 0, 'nos': 1, 'pop': 2, 'under': 3}
 ALU_OPS = ['add', 'adc', 'sub', 'sbc', 'and', 'or', 'xor', 'bic']
-OP = {'ld': 8, 'st': 9}
+OP = {'ld': 8, 'st': 9, 'swap': 10}
 OP.update({name: i for i, name in enumerate(ALU_OPS)})
 
 
@@ -286,6 +293,8 @@ def encode(mnemonic, operands, labels, pc=0):
         raise AsmError(f'{name} takes two operands')
     if name in ALU_OPS and suffix == 'bs':
         raise AsmError('ALU instructions have no .bs form, use .b')
+    if name == 'swap' and suffix == 'bs':
+        raise AsmError('swap has no .bs form, use .b')
     lab = labels if labels is not None else {}
 
     def val(text):
@@ -303,6 +312,11 @@ def encode(mnemonic, operands, labels, pc=0):
         raise AsmError(f'{dd_name!r} is not a stack operand of {name} ({", ".join(dds)})')
     dd = dds[dd_name]
     kind, arg = operand
+    if name == 'swap':
+        if dd > 1:
+            raise AsmError('swap takes tos or nos')
+        if kind in ('imm', 'reg') or (kind == 'sp' and val(arg) < 4):
+            raise AsmError('swap needs a memory operand')
     if kind == 'imm':
         if name == 'st':
             raise AsmError('st has no immediate form')

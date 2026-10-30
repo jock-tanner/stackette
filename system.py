@@ -75,6 +75,7 @@ class System(wiring.Component):
         m.d.comb += [
             cpu.stack_mem_fault.eq(arb.fault0),
             cpu.mem_fault.eq(arb.fault1),
+            arb.lock1.eq(cpu.mem_lock),
         ]
 
         # the translation, and the refusal that comes back

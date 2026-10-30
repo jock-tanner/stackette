@@ -12,6 +12,9 @@ initiators, each with its own address-space tag.
                             `mem` (see MemorySelect); it goes back as `faultN`
                             to the initiator whose request that is
   faultN   Out(1)
+  lockN    In(1)            initiator N holds the memory: while it is up, no
+                            other initiator is granted (SWAP does that from
+                            its read to its write, so nothing gets in between)
 
 Fixed priority: port0 wins over port1 and so on. Requests are passed through
 combinationally, with no added latency; the loser simply sees ready low and
@@ -45,6 +48,7 @@ class MemoryArbiter(Component):
             members[f'port{i}'] = In(MemoryPort(addr_width))
             members[f'space{i}'] = In(Space)
             members[f'fault{i}'] = Out(1)
+            members[f'lock{i}'] = In(1)
         super().__init__(members)
         self.n = n
 
@@ -63,9 +67,15 @@ class MemoryArbiter(Component):
 
         # ---- fixed-priority grant ----
         grant = [Signal(name=f'grant{i}') for i in range(n)]
+        locks = [getattr(self, f'lock{i}') for i in range(n)]
         blocked = Const(0)
         for i in range(n):
-            eligible = reqs[i].valid & (reqs[i].we | free)
+            # someone else holds the memory
+            held = Const(0)
+            for j in range(n):
+                if j != i:
+                    held = held | locks[j]
+            eligible = reqs[i].valid & (reqs[i].we | free) & ~held
             m.d.comb += grant[i].eq(eligible & ~blocked)
             blocked = blocked | eligible
 
