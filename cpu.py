@@ -110,6 +110,12 @@ class CPU(Component):
     # CTX_PSP are read only.
     user: Out(1)
 
+    # An interrupt request, a level, from the interrupt controller with the
+    # number of the line. It is taken in the user context, between two
+    # instructions; in the system context it waits.
+    irq: In(1)
+    irq_num: In(6)
+
     # high while the system context is being reset (a soft reset), so that
     # the MMU puts the default map back into its system registers
     soft_reset: Out(1)
@@ -595,10 +601,11 @@ class CPU(Component):
 
             # ---- fetch ----
             with m.State('FETCH'):
+                # a pending asynchronous fault or an interrupt is taken here,
+                # between two instructions, and the fetch is not made
+                take_irq = self.irq & user
                 m.d.comb += [
-                    # a pending asynchronous fault is taken here, between two
-                    # instructions, and the fetch is not made
-                    req.valid.eq(~pend_wb),
+                    req.valid.eq(~(pend_wb | take_irq)),
                     req.we.eq(0),
                     req.byte_hi.eq(1),
                     req.byte_lo.eq(1),
@@ -607,6 +614,10 @@ class CPU(Component):
                 with m.If(pend_wb):
                     m.d.sync += pend_wb.eq(0)
                     abort(ID_FAULT | FAULT_WB, wb_addr, first_fetch=True)
+                with m.Elif(take_irq):
+                    # the user context carries on with the instruction that
+                    # was to be fetched (or with the SKIP before it)
+                    abort(ID_IRQ | self.irq_num, 0, first_fetch=True)
                 with m.Elif(self.mem_fault):
                     mem_refused(first_fetch=True)
                 with m.Elif(req.ready):
@@ -1288,6 +1299,7 @@ class CPUTop(Elaboratable):
         connect(m, flash.bus, system.flash)
         connect(m, sdram.bus, system.ram)
         connect(m, uart.bus, system.uart)
+        m.d.comb += system.irq_ext.eq(uart.rx_avail)
 
         # UART pins hookup
         platform.add_resources([

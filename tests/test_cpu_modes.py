@@ -3,8 +3,9 @@ Test for the system and user contexts of cpu.py: TRAP, RETI, exceptions, soft
 reset, the context device, and the asynchronous fault of a write-back of the
 stack cache.
 
-hwtest/hw7_modes.asm and hw8_mmu.asm are run on the whole System (CPU, arbiter, MMU,
-memory select, peripheral bus with the context device and the MMU registers).
+hwtest/hw7_modes.asm, hw8_mmu.asm and hw9_irq.asm are run on the whole System
+(CPU, arbiter, MMU, memory select, peripheral bus with the context device, the
+MMU registers, the interrupt controller and the timer).
 The flash (holding the program) and the SDRAM are behavioral models with
 random ready and 1..4 cycles of read latency; the UART is a register that
 logs what is written to it. The test expects the programs' output.
@@ -103,6 +104,10 @@ def test_cpu_modes():
     for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
         out, seen = run_program('hw8_mmu.asm', seed, 8000, p_ready)
         assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
+    # the interrupts: the timer, the mask, between SKIP and what it skips
+    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+        out, seen = run_program('hw9_irq.asm', seed, 60000, p_ready)
+        assert out == b'ABCDE', f'seed {seed}: the output is {out!r}'
     print('ok')
 
 

@@ -6,6 +6,8 @@ these byte addresses with the default map of the MMU (the port carries word
 addresses, 8 bits wide, so the devices repeat every 512 bytes):
 
     0xf000..0xf007   UART       (4 words)
+    0xf008..0xf00f   interrupt controller (4 words, see intc.py)
+    0xf010..0xf01f   timer (8 words, see timer.py)
     0xf020..0xf03f   context device (16 words, see context_device.py)
     0xf100..0xf1ff   MMU registers (128 words, see mmu.py)
 
@@ -15,11 +17,16 @@ The same rules as in memory_select.py: a pure multiplexer for the requests,
 the responses of the devices are ORed together, and the initiator must not
 have more than one read in flight.
 """
+from functools import reduce
+from operator import or_
+
 from amaranth import Module, Signal
 from amaranth.lib.wiring import Component, In, Out
 
+from intc import INTC_ADDR_WIDTH
 from memory_port import MemoryPort
 from mmu import REG_ADDR_WIDTH
+from timer import TIMER_ADDR_WIDTH
 from uart import UART_ADDR_WIDTH
 
 PERIPH_ADDR_WIDTH = 8
@@ -29,6 +36,8 @@ CTX_ADDR_WIDTH = 4
 class PeriphBus(Component):
     bus: In(MemoryPort(PERIPH_ADDR_WIDTH))
     uart: Out(MemoryPort(UART_ADDR_WIDTH))
+    intc: Out(MemoryPort(INTC_ADDR_WIDTH))
+    timer: Out(MemoryPort(TIMER_ADDR_WIDTH))
     ctx: Out(MemoryPort(CTX_ADDR_WIDTH))
     mmu: Out(MemoryPort(REG_ADDR_WIDTH))
 
@@ -37,32 +46,43 @@ class PeriphBus(Component):
         req, resp = self.bus.req, self.bus.resp
 
         sel_uart = Signal()
+        sel_intc = Signal()
+        sel_timer = Signal()
         sel_ctx = Signal()
         sel_mmu = Signal()
         m.d.comb += [
             sel_uart.eq(req.addr[2:] == 0),
+            sel_intc.eq(req.addr[2:] == 1),
+            sel_timer.eq(req.addr[3:] == 1),
             sel_ctx.eq(req.addr[4:] == 1),
             sel_mmu.eq(req.addr[7:] == 1),
         ]
-        unmapped = ~sel_uart & ~sel_ctx & ~sel_mmu
+        unmapped = ~(sel_uart | sel_intc | sel_timer | sel_ctx | sel_mmu)
 
-        for target, sel in (
-            (self.uart, sel_uart), (self.ctx, sel_ctx), (self.mmu, sel_mmu)
-        ):
+        targets = (
+            (self.uart, sel_uart),
+            (self.intc, sel_intc),
+            (self.timer, sel_timer),
+            (self.ctx, sel_ctx),
+            (self.mmu, sel_mmu),
+        )
+        for target, sel in targets:
             r = target.req
             m.d.comb += [
                 r.valid.eq(req.valid & sel),
                 r.we.eq(req.we),
                 r.byte_hi.eq(req.byte_hi),
                 r.byte_lo.eq(req.byte_lo),
-                r.addr.eq(req.addr),    # truncated
+                r.addr.eq(req.addr),  # truncated
                 r.wdata.eq(req.wdata),
             ]
         m.d.comb += req.ready.eq(
-            (sel_uart & self.uart.req.ready)
+            unmapped
+            | (sel_uart & self.uart.req.ready)
+            | (sel_intc & self.intc.req.ready)
+            | (sel_timer & self.timer.req.ready)
             | (sel_ctx & self.ctx.req.ready)
             | (sel_mmu & self.mmu.req.ready)
-            | unmapped
         )
 
         # a read of nothing: 0, one cycle after the request, like the devices
@@ -71,15 +91,16 @@ class PeriphBus(Component):
 
         m.d.comb += [
             resp.valid.eq(
-                self.uart.resp.valid
-                | self.ctx.resp.valid
-                | self.mmu.resp.valid
-                | dummy
+                dummy | reduce(or_, (t.resp.valid for t, _ in targets))
             ),
             resp.data.eq(
-                (self.uart.resp.data & self.uart.resp.valid.replicate(16))
-                | (self.ctx.resp.data & self.ctx.resp.valid.replicate(16))
-                | (self.mmu.resp.data & self.mmu.resp.valid.replicate(16))
+                reduce(
+                    or_,
+                    (
+                        t.resp.data & t.resp.valid.replicate(16)
+                        for t, _ in targets
+                    ),
+                )
             ),
         ]
         return m

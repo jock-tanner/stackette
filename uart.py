@@ -149,6 +149,7 @@ class UART(Component):
     """Register-file front end for UARTCore, see the module docstring."""
     bus: In(MemoryPort(UART_ADDR_WIDTH))
     pins: Out(UARTPins())
+    rx_avail: Out(1)  # a level for an interrupt line: STATUS bit 1
 
     def __init__(self, divisor, data_bits=8):
         assert data_bits <= 16, 'Registers are 16 bits wide!'
@@ -187,6 +188,8 @@ class UART(Component):
 
         # Receive: reading DATA while a byte is waiting consumes it.
         m.d.comb += core.rx_ack.eq(accept & read_data & core.rx_rdy)
+
+        m.d.comb += self.rx_avail.eq(core.rx_rdy)
 
         status = Cat(
             core.tx_ack,                    # bit 0: TX ready
