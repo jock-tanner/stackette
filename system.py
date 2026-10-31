@@ -50,15 +50,18 @@ class System(wiring.Component):
     # interrupt lines of devices outside (line 1 and up; line 0 is the timer)
     irq_ext: In(N_LINES - 1)
 
-    def __init__(self, **cpu_kwargs):
+    def __init__(self, *, mmu_sync=False, **cpu_kwargs):
+        # `mmu_sync`: the MMU with synchronous read ports (block RAM, one
+        # more clock for every access), see mmu.py
         super().__init__()
+        self.mmu_sync = mmu_sync
         self.cpu_kwargs = cpu_kwargs
 
     def elaborate(self, platform):
         m = Module()
         m.submodules.cpu = cpu = self.cpu = CPU(**self.cpu_kwargs)
         m.submodules.arb = arb = MemoryArbiter(CPU_ADDR_WIDTH, n=2)
-        m.submodules.mmu = mmu = MMU()
+        m.submodules.mmu = mmu = MMU(sync=self.mmu_sync)
         m.submodules.sel = sel = MemorySelect(periph_addr_width=PERIPH_ADDR_WIDTH)
         m.submodules.periph = periph = PeriphBus()
         m.submodules.ctx_dev = ctx_dev = ContextDevice()

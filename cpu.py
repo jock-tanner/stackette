@@ -1426,6 +1426,11 @@ class CPU(Component):
 
 
 class CPUTop(Elaboratable):
+    def __init__(self, *, mmu_sync=False):
+        # the MMU with synchronous read ports: block RAM instead of LUTs, one
+        # more clock for every memory access (see mmu.py)
+        self.mmu_sync = mmu_sync
+
     def elaborate(self, platform):
         from amaranth.build import Pins, Resource
 
@@ -1435,7 +1440,7 @@ class CPUTop(Elaboratable):
         from uart import UART
 
         m = Module()
-        m.submodules.system = system = System()
+        m.submodules.system = system = System(mmu_sync=self.mmu_sync)
 
         # connect the system to the memories and the UART
         m.submodules.sdram = sdram = DE0NanoSDRAM()

@@ -77,13 +77,15 @@ def assembled(name):
     return {i: w for i, w in enumerate(words)}
 
 
-def run_program(name, seed, n_cycles, p_ready, received=()):
+def run_program(
+    name, seed, n_cycles, p_ready, received=(), mmu_sync=False
+):
     # `received`: (cycle, byte) pairs that arrive at the UART
     rng = random.Random(seed)
     flash = assembled(name)
     ram = {}
     uart = []
-    dut = System()
+    dut = System(mmu_sync=mmu_sync)
     sim = Simulator(dut)
     sim.add_clock(1e-6)
     sim.add_testbench(serve(dut.flash, flash, rng, p_ready), background=True)
@@ -167,6 +169,22 @@ def test_cpu_modes():
     for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
         out, seen = run_program('hw9_irq.asm', seed, 60000, p_ready)
         assert out == b'ABCDE', f'seed {seed}: the output is {out!r}'
+    # the MMU with synchronous read ports: one more clock for a request
+    for name, expected, cycles, received in (
+        ('hw7_modes.asm', b'ABCBCDEFGHSITJ', 12000, ()),
+        ('hw8_mmu.asm', b'ABCDEFG', 16000, ()),
+        ('hw10_swap.asm', b'ABCDEFG', 8000, ()),
+        ('hw12_muldiv.asm', b'ABCDEFG', 12000, ()),
+        ('hw11_uart_irq.asm', b'>abcYx', 28000, received),
+        ('hw9_irq.asm', b'ABCDE', 120000, ()),
+    ):
+        for seed, p_ready in ((1, 1.0), (2, 0.5)):
+            out, seen = run_program(
+                name, seed, cycles, p_ready, received, mmu_sync=True
+            )
+            assert out == expected, (
+                f'{name}, synchronous MMU, seed {seed}: the output is {out!r}'
+            )
     print('ok')
 
 

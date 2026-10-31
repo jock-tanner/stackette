@@ -9,9 +9,7 @@ address spaces of the CPU (code, return stack, parameter stack, data) has its
 own 16 registers, and there are two such arrays of 64 registers: one for the
 system context and one for the user context, picked by the `user` flag.
 
-The 128 registers live in an Amaranth Memory with asynchronous read ports (the
-translation is combinational: no latency, and a fault from MemorySelect comes
-back in the same cycle as the request). They are exposed to the system
+The 128 registers live in an Amaranth Memory. They are exposed to the system
 software through `regs`, a memory-mapped device of 128 words:
 
     word  0..63    system array, space * 16 + page (CODE, RSTACK, PSTACK, DATA)
@@ -30,8 +28,25 @@ all requests wait; the user array is left alone.
 
 Everything else is a wire: a request goes through with its byte enables and
 data, ready, the response and the fault come back.
+
+Two ways to read the registers, picked by the `sync` parameter:
+
+  * sync=False (default): asynchronous read ports. The translation is
+    combinational, there is no latency, and a fault from MemorySelect comes
+    back in the same cycle as the request. An FPGA has no asynchronous block
+    RAM, so the memory becomes LUTs (a lot of them).
+  * sync=True: synchronous read ports, which the synthesis tool can put in
+    block RAM. The translation is looked up while the request is presented
+    and used in the next cycle, so every request takes one more clock: in the
+    first cycle `ready` and `fault` are low and nothing goes out on `mem`, in
+    the second the request goes through as before. Nothing else changes for
+    the initiator: it holds the request until `ready` or `fault`, as the
+    protocol says. The lookup is remembered by the address it was made for
+    (the virtual page, the space and `user`), so a request that is replaced
+    by another one (the arbiter switches to a higher priority) is looked up
+    again, and so is one for which a register was written in the meantime.
 """
-from amaranth import C, Cat, Module, Mux, Signal
+from amaranth import C, Cat, Module, Signal
 from amaranth.lib.memory import Memory
 from amaranth.lib.wiring import Component, In, Out
 
@@ -69,16 +84,24 @@ class MMU(Component):
     reset_system: In(1)
     regs: In(MemoryPort(REG_ADDR_WIDTH))
 
+    def __init__(self, *, sync=False):
+        super().__init__()
+        self.sync = sync
+
     def elaborate(self, platform):
         m = Module()
         req, resp = self.cpu.req, self.cpu.resp
         out, back = self.mem.req, self.mem.resp
 
         init = [default_page(i % SYSTEM_REGS) for i in range(2 * SYSTEM_REGS)]
-        m.submodules.regs_mem = regs_mem = Memory(shape=16, depth=2 * SYSTEM_REGS, init=init)
-        translate = regs_mem.read_port(domain='comb')
-        reading = regs_mem.read_port(domain='comb')
-        writing = regs_mem.write_port()
+        m.submodules.regs_mem = regs_mem = Memory(
+            shape=16, depth=2 * SYSTEM_REGS, init=init
+        )
+        read_domain = 'sync' if self.sync else 'comb'
+        translate = regs_mem.read_port(domain=read_domain)
+        reading = regs_mem.read_port(domain=read_domain)
+        # the bytes of a register are written separately: no read-modify-write
+        writing = regs_mem.write_port(granularity=8)
 
         # ---- soft reset of the system array: 64 cycles, all requests wait ----
         sweeping = Signal()
@@ -100,17 +123,33 @@ class MMU(Component):
             m.d.comb += sweep_page.eq(sweep[0:4])
 
         # ---- the translation ----
+        key = Signal(REG_ADDR_WIDTH)
+        m.d.comb += key.eq(
+            Cat(req.addr[PAGE_WORD_BITS:], self.space, self.user)
+        )
+        # `go`: the request may go out now
+        go = Signal()
+        if self.sync:
+            # the register that `translate.data` shows was read in the last
+            # cycle for the address `last_key`
+            last_key = Signal(REG_ADDR_WIDTH)
+            looked = Signal()
+            m.d.sync += [
+                last_key.eq(key),
+                looked.eq(req.valid & ~writing.en.any()),
+            ]
+            m.d.comb += go.eq(looked & (last_key == key) & ~sweeping)
+        else:
+            m.d.comb += go.eq(~sweeping)
         m.d.comb += [
-            translate.addr.eq(
-                Cat(req.addr[PAGE_WORD_BITS:], self.space, self.user)
-            ),
-            out.valid.eq(req.valid & ~sweeping),
+            translate.addr.eq(key),
+            out.valid.eq(req.valid & go),
             out.we.eq(req.we),
             out.byte_hi.eq(req.byte_hi),
             out.byte_lo.eq(req.byte_lo),
             out.addr.eq(Cat(req.addr[:PAGE_WORD_BITS], translate.data)),
             out.wdata.eq(req.wdata),
-            req.ready.eq(out.ready & ~sweeping),
+            req.ready.eq(out.ready & go),
             resp.valid.eq(back.valid),
             resp.data.eq(back.data),
             self.fault.eq(self.mem_fault),
@@ -118,31 +157,27 @@ class MMU(Component):
 
         # ---- the registers as a device ----
         rreq, rresp = self.regs.req, self.regs.resp
-        merged = Signal(16)
         m.d.comb += [
             rreq.ready.eq(1),
             reading.addr.eq(rreq.addr),
-            merged[0:8].eq(
-                Mux(rreq.byte_lo, rreq.wdata[0:8], reading.data[0:8])
-            ),
-            merged[8:16].eq(
-                Mux(rreq.byte_hi, rreq.wdata[8:16], reading.data[8:16])
-            ),
         ]
         with m.If(sweeping):
             m.d.comb += [
                 writing.addr.eq(Cat(sweep, C(0, 1))),
                 writing.data.eq(sweep_page),
-                writing.en.eq(1),
+                writing.en.eq(0b11),
             ]
         with m.Else():
+            write = rreq.valid & rreq.we
             m.d.comb += [
                 writing.addr.eq(rreq.addr),
-                writing.data.eq(merged),
-                writing.en.eq(rreq.valid & rreq.we),
+                writing.data.eq(rreq.wdata),
+                writing.en.eq(Cat(rreq.byte_lo & write, rreq.byte_hi & write)),
             ]
-        m.d.sync += [
-            rresp.valid.eq(rreq.valid & ~rreq.we),
-            rresp.data.eq(reading.data),
-        ]
+        m.d.sync += rresp.valid.eq(rreq.valid & ~rreq.we)
+        if self.sync:
+            # the read port has the word one cycle after the address
+            m.d.comb += rresp.data.eq(reading.data)
+        else:
+            m.d.sync += rresp.data.eq(reading.data)
         return m

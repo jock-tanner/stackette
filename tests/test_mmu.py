@@ -1,6 +1,8 @@
 """
 Test for mmu.py: the translation, the registers as a device, byte enables, the
-refusal that passes back, and the reset of the system array.
+refusal that passes back, and the reset of the system array. All that is run
+for both kinds of MMU (asynchronous and synchronous read ports), and the
+latency of the synchronous one is tested separately.
 
 The MMU is driven directly: the testbench is the initiator on `cpu` and on
 `regs`, and the target on `mem` (always ready).
@@ -15,9 +17,9 @@ from memory_select import FLASH_PAGE, PERIPH_PAGE
 from mmu import MMU, default_page
 
 
-def run_case(seed):
+def run_case(seed, sync=False):
     rng = random.Random(seed)
-    dut = MMU()
+    dut = MMU(sync=sync)
     req = dut.cpu.req
     out = dut.mem.req
     rreq, rresp = dut.regs.req, dut.regs.resp
@@ -143,11 +145,114 @@ def run_case(seed):
     sim.run()
 
 
+def run_latency():
+    """The synchronous MMU: when a request goes through, cycle by cycle."""
+    dut = MMU(sync=True)
+    req = dut.cpu.req
+    out = dut.mem.req
+    rreq = dut.regs.req
+    sim = Simulator(dut)
+    sim.add_clock(1e-6)
+
+    async def cycle(ctx):
+        _, _, ready, valid, addr, fault = await ctx.tick().sample(
+            req.ready, out.valid, out.addr, dut.fault
+        )
+        return ready, valid, addr, fault
+
+    def present(ctx, page, space=3, user=0):
+        ctx.set(dut.space, space)
+        ctx.set(dut.user, user)
+        ctx.set(req.addr, page << 11 | 0x15)
+        ctx.set(req.we, 0)
+        ctx.set(req.valid, 1)
+        ctx.set(out.ready, 1)
+
+    async def bench(ctx):
+        # a request for a page that was not looked up: nothing goes out in
+        # the first cycle, the request goes through in the second
+        present(ctx, 3)
+        ready, valid, _, _ = await cycle(ctx)
+        assert (ready, valid) == (0, 0), 'no lookup cycle'
+        ready, valid, addr, _ = await cycle(ctx)
+        assert (ready, valid, addr) == (1, 1, 3 << 11 | 0x15)
+        # the next request for the same page can go at once, a request
+        # for another page has to wait for its lookup
+        ready, valid, addr, _ = await cycle(ctx)
+        assert (ready, valid, addr) == (1, 1, 3 << 11 | 0x15)
+        present(ctx, 4)
+        ready, valid, _, _ = await cycle(ctx)
+        assert (ready, valid) == (0, 0)
+        ready, valid, addr, _ = await cycle(ctx)
+        assert (ready, valid, addr) == (1, 1, 4 << 11 | 0x15)
+        # the space and the user flag make another register as well
+        present(ctx, 4, space=2)
+        ready, valid, _, _ = await cycle(ctx)
+        assert (ready, valid) == (0, 0)
+        present(ctx, 4, space=3, user=1)
+        ready, valid, _, _ = await cycle(ctx)
+        assert (ready, valid) == (0, 0)
+        ready, valid, addr, _ = await cycle(ctx)
+        assert (ready, valid, addr) == (1, 1, 4 << 11 | 0x15)
+
+        # a target that is not ready: the request is held, nothing is looked
+        # up again
+        present(ctx, 5)
+        ctx.set(out.ready, 0)
+        await cycle(ctx)
+        for _ in range(3):
+            ready, valid, addr, _ = await cycle(ctx)
+            assert (ready, valid, addr) == (0, 1, 5 << 11 | 0x15)
+        ctx.set(out.ready, 1)
+        ready, valid, _, _ = await cycle(ctx)
+        assert (ready, valid) == (1, 1)
+
+        # MemorySelect's refusal comes in the second cycle, with the request
+        present(ctx, 6)
+        await cycle(ctx)
+        ctx.set(out.ready, 0)
+        ctx.set(dut.mem_fault, 1)
+        ready, valid, _, fault = await cycle(ctx)
+        assert (ready, valid, fault) == (0, 1, 1)
+        ctx.set(dut.mem_fault, 0)
+        ctx.set(out.ready, 1)
+        ctx.set(req.valid, 0)
+        await cycle(ctx)
+
+        # a register that is written while its page is being looked up: the
+        # old translation is not used
+        present(ctx, 7)
+        ctx.set(rreq.addr, 3 * 16 + 7)
+        ctx.set(rreq.wdata, 0x0abc)
+        ctx.set(rreq.byte_hi, 1)
+        ctx.set(rreq.byte_lo, 1)
+        ctx.set(rreq.we, 1)
+        ctx.set(rreq.valid, 1)
+        ready, valid, _, _ = await cycle(ctx)
+        assert (ready, valid) == (0, 0)
+        ctx.set(rreq.valid, 0)
+        ready, valid, _, _ = await cycle(ctx)
+        assert (ready, valid) == (0, 0), 'the old lookup was used'
+        ready, valid, addr, _ = await cycle(ctx)
+        assert (ready, valid, addr) == (1, 1, 0x0abc << 11 | 0x15)
+
+    sim.add_testbench(bench)
+    sim.run()
+
+
 def test_mmu():
     for seed in range(3):
         run_case(seed)
     print('ok')
 
 
+def test_mmu_sync():
+    for seed in range(3):
+        run_case(seed, sync=True)
+    run_latency()
+    print('ok')
+
+
 if __name__ == '__main__':
     test_mmu()
+    test_mmu_sync()
