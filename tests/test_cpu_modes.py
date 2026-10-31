@@ -3,9 +3,10 @@ Test for the system and user contexts of cpu.py: TRAP, RETI, exceptions, soft
 reset, the context device, and the asynchronous fault of a write-back of the
 stack cache.
 
-hwtest/hw7_modes.asm, hw8_mmu.asm, hw9_irq.asm and hw10_swap.asm are run on
-the whole System (CPU, arbiter, MMU, memory select, peripheral bus with the
-context device, the MMU registers, the interrupt controller and the timer).
+hwtest/hw7_modes.asm, hw8_mmu.asm, hw9_irq.asm, hw10_swap.asm and
+hw11_uart_irq.asm are run on the whole System (CPU, arbiter, MMU, memory
+select, peripheral bus with the context device, the MMU registers, the
+interrupt controller and the timer).
 The flash (holding the program) and the SDRAM are behavioral models with
 random ready and 1..4 cycles of read latency; the UART is a register that
 logs what is written to it. The test expects the programs' output.
@@ -24,8 +25,11 @@ from system import System
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def serve(port, store, rng, p_ready, uart=None):
-    # with `uart` the port is the UART's: a write of word 0 is logged, reads give 0
+def serve(port, store, rng, p_ready, uart=None, rx=None, irq=None):
+    # with `uart` the port is the UART's: a write of word 0 is logged. The
+    # reads give 0, or with `rx` (a list of the received bytes) DATA takes the
+    # first of them and STATUS tells if there is one; `irq` is the interrupt
+    # line of the receiver, which goes down at once when the last byte is read
     async def target(ctx):
         pending = []
         ready_now = True
@@ -47,7 +51,13 @@ def serve(port, store, rng, p_ready, uart=None):
                         cur = (cur & 0x00ff) | (wd & 0xff00)
                     store[addr] = cur
                 elif uart is not None:
-                    pending.append([rng.randint(1, 4) - 1, 0])
+                    data = 0
+                    if rx is not None and addr == 0 and rx:
+                        data = rx.pop(0)
+                        ctx.set(irq, int(bool(rx)))
+                    elif rx is not None and addr == 1:
+                        data = 1 | bool(rx) << 1
+                    pending.append([rng.randint(1, 4) - 1, data])
                 else:
                     pending.append([rng.randint(1, 4) - 1, store.get(addr, 0)])
             ready_now = rng.random() < p_ready
@@ -67,7 +77,8 @@ def assembled(name):
     return {i: w for i, w in enumerate(words)}
 
 
-def run_program(name, seed, n_cycles, p_ready):
+def run_program(name, seed, n_cycles, p_ready, received=()):
+    # `received`: (cycle, byte) pairs that arrive at the UART
     rng = random.Random(seed)
     flash = assembled(name)
     ram = {}
@@ -77,13 +88,21 @@ def run_program(name, seed, n_cycles, p_ready):
     sim.add_clock(1e-6)
     sim.add_testbench(serve(dut.flash, flash, rng, p_ready), background=True)
     sim.add_testbench(serve(dut.ram, ram, rng, p_ready), background=True)
-    sim.add_testbench(serve(dut.uart, {}, rng, p_ready, uart), background=True)
+    rx = []
+    sim.add_testbench(
+        serve(dut.uart, {}, rng, p_ready, uart, rx, dut.irq_ext),
+        background=True,
+    )
     seen = {'aborts': 0, 'swaps': 0}
 
     async def bench(ctx):
-        for _ in range(n_cycles):
+        for cycle in range(n_cycles):
             await ctx.tick()
             seen['aborts'] += ctx.get(dut.cpu.aborted)
+            for at, byte in received:
+                if at == cycle:
+                    rx.append(byte)
+                    ctx.set(dut.irq_ext, 1)
 
     # SWAP is atomic: a request of the RAM that is accepted while the CPU
     # holds the memory is a read, and the next one is the write to the same
@@ -132,6 +151,14 @@ def test_cpu_modes():
         out, seen = run_program('hw10_swap.asm', seed, 4000, p_ready)
         assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
         assert seen['swaps'] == 7, seen
+    # the UART receiver interrupts: the bytes are echoed by the handler, a
+    # '?' is answered; two bytes come at the same time
+    received = [(4000, 97), (4000, 98), (6000, 99), (9000, 63), (9001, 120)]
+    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+        out, seen = run_program(
+            'hw11_uart_irq.asm', seed, 14000, p_ready, received
+        )
+        assert out == b'>abcYx', f'seed {seed}: the output is {out!r}'
     # the interrupts: the timer, the mask, between SKIP and what it skips
     for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
         out, seen = run_program('hw9_irq.asm', seed, 60000, p_ready)

@@ -328,8 +328,10 @@ def sim_bus():
         # the looped-back byte arrives, no error, no overrun
         status = await wait_status(ctx, 0b0010)
         assert (status >> 1) & 0b111 == 0b001, bin(status)
+        assert ctx.get(uart.rx_avail) == 1      # the interrupt line is up
         assert await bus_read(ctx, REG_DATA) == 0x5A
         assert not (await bus_read(ctx, REG_STATUS) & 0b0010)   # consumed
+        assert ctx.get(uart.rx_avail) == 0      # ... and down
 
         # a DATA write while the transmitter is busy stalls until it is idle
         await wait_status(ctx, 0b0001)
