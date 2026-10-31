@@ -1,4 +1,4 @@
-; MUL and DIV. Expect ABCDEFG, then silence. A check that fails stops the
+; MUL, DIV and NOP. Expect ABCDEFG, then silence. A check that fails stops the
 ; program with the letter missing. Each step leaves the stack as it found it.
 ; The last step is a division by zero, fault 4: it resets the system context
 ; and the interrupt ID tells it.
@@ -13,6 +13,7 @@ start:  ld push, [0xf02e]       ; interrupt ID, 0 after power-up
         ld push, #300
         ld push, #200
         mulu
+        nop                     ; changes nothing
         skip cc
         bra fail
         skip vc

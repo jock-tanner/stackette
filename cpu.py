@@ -55,6 +55,7 @@ UOP_SXT = 2
 UOP_BSWAP = 3
 UOP_RLC = 4
 UOP_RRC = 5
+MISC_NOP = 0
 MISC_RET_N = 1
 MISC_RETI = 2
 MISC_TRAP = 4
@@ -257,6 +258,8 @@ class CPU(Component):
         is_call_pop = is_misc & (misc_op == MISC_CALL_POP)
         is_reti = is_misc & (misc_op == MISC_RETI)
         is_trap = is_misc & (misc_op == MISC_TRAP)
+        # NOP is 0xf800, and nothing else of its op
+        is_nop = is_misc & (misc_op == MISC_NOP) & (instr[0:6] == 0)
         is_call_direct = is_call_rel | is_call_abs
         reg_mode = is_gen & (mode == MODE_REG)
         ptr_mode = is_gen & (
@@ -288,7 +291,7 @@ class CPU(Component):
                 | is_call_abs | is_jmp_abs | is_call_pop
                 # RETI is an illegal instruction in user mode
                 | (is_reti & ~user) | is_trap
-                | is_muldiv
+                | is_muldiv | is_nop
         )
         ok = ok_ld | ok_st | ok_alu | ok_swap | ok_ctl
 

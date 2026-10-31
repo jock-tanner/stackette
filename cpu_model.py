@@ -64,6 +64,7 @@ def i_gen(op, dd, s, mode, x, extra=None):
 
 
 # control format 11
+MISC_NOP = 0
 MISC_RET_N = 1
 MISC_CALL_ABS = 5
 MISC_JMP_ABS = 6
@@ -941,6 +942,8 @@ class Program:
             case x if x < 0.89:
                 if not self.muldiv_one():
                     self.ld_one()
+            case x if x < 0.90:
+                self.emit(i_misc(MISC_NOP))
             case _:
                 while not self.st_one():
                     self.ld_one()

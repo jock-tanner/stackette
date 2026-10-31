@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Tiny assembler for the LD and ST instructions of the stack CPU (cpu.py).
 
@@ -56,6 +55,7 @@ Control flow:
     trap #p             a system call: the system context runs, p (0..63) is in its
                         interrupt ID (the number of class 2). One word, so a trap
                         can also be a breakpoint.
+    nop                 do nothing (0xf800)
     reti                (system mode only) switch to the user context; the system
                         context continues after it the next time it runs. In user
                         mode it is an illegal instruction.
@@ -199,7 +199,7 @@ UNARY = {'not': 0, 'neg': 1, 'sxt': 2, 'bswap': 3, 'rlc': 4, 'rrc': 5}
 # multiplication and division take no operands: NOS and TOS are replaced by
 # the primary result (TOS) and the secondary one (NOS)
 MULDIV = {'mulu': 0xe400, 'muls': 0xe500, 'divu': 0xe600, 'divs': 0xe700}
-CTL = ('bra', 'call', 'calla', 'jmp', 'ret', 'addp', 'skip', 'setb', 'clrb', 'reti', 'trap')
+CTL = ('bra', 'call', 'calla', 'jmp', 'ret', 'addp', 'skip', 'setb', 'clrb', 'reti', 'trap', 'nop')
 CONDITIONS = {
     'eq': 0, 'z': 0, 'ne': 1, 'nz': 1,
     'cs': 2, 'hs': 2, 'c': 2, 'cc': 3, 'lo': 3, 'nc': 3,
@@ -208,7 +208,7 @@ CONDITIONS = {
     'pe': 14, 'po': 15,
 }
 MISC = 0xf800
-MISC_RET_N, MISC_RETI, MISC_TRAP, MISC_CALL_ABS, MISC_JMP_ABS, MISC_CALL_POP, MISC_RET_VAR = 1, 2, 4, 5, 6, 7, 9
+MISC_NOP, MISC_RET_N, MISC_RETI, MISC_TRAP, MISC_CALL_ABS, MISC_JMP_ABS, MISC_CALL_POP, MISC_RET_VAR = 0, 1, 2, 4, 5, 6, 7, 9
 
 
 def encode_ctl(name, operands, labels, pc):
@@ -256,6 +256,10 @@ def encode_ctl(name, operands, labels, pc):
         if not 0 <= p <= 63:
             raise AsmError('trap #p: p must be 0..63')
         return [MISC | MISC_TRAP << 6 | p]
+    if name == 'nop':
+        if operands:
+            raise AsmError('nop takes no operands')
+        return [MISC | MISC_NOP << 6]
     if name == 'ret':
         if not operands:
             return [MISC | MISC_RET_VAR << 6]
