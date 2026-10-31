@@ -1426,7 +1426,7 @@ class CPU(Component):
 
 
 class CPUTop(Elaboratable):
-    def __init__(self, *, mmu_sync=False):
+    def __init__(self, *, mmu_sync=True):
         # the MMU with synchronous read ports: block RAM instead of LUTs, one
         # more clock for every memory access (see mmu.py)
         self.mmu_sync = mmu_sync
@@ -1466,4 +1466,9 @@ class CPUTop(Elaboratable):
 if __name__ == '__main__':
     from amaranth_boards.de0nano import DE0NanoPlatform
 
-    DE0NanoPlatform().build(CPUTop(), do_program=True)
+    platform = DE0NanoPlatform()
+    platform.build(
+        CPUTop(),
+        do_program=True,
+        add_constraints='derive_pll_clocks\nderive_clock_uncertainty\n',
+    )
