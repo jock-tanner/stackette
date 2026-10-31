@@ -1,0 +1,146 @@
+%%{init: {'theme':'base','themeVariables':{'fontFamily':'Helvetica,Arial,sans-serif','fontSize':'15px','primaryColor':'#ffffff','primaryBorderColor':'#374151','lineColor':'#4b5563'}}}%%
+flowchart TD
+  INIT(["INIT<br/>SET_PSP = PSP_INIT"])
+  subgraph FE["fetch and decode"]
+    FETCH["FETCH<br/>read the code word at ip"]
+    FETCH_WAIT["FETCH_WAIT"]
+    DECODE["DECODE"]
+    EXTRA["EXTRA<br/>imm16 / abs16"]
+    EXTRA_WAIT["EXTRA_WAIT"]
+    EXEC["EXEC"]
+  end
+  subgraph LD["LD, ALU, unary, SWAP"]
+    LD_COH["LD_COH<br/>FLUSH if in window"]
+    LD_IDLE["LD_IDLE"]
+    LD_RD["LD_RD"]
+    LD_RD_WAIT["LD_RD_WAIT"]
+    LD_DELIVER["LD_DELIVER<br/>cache command"]
+    SWAP_TAKE["SWAP_TAKE<br/>take TOS or NOS"]
+    SWAP_WR["SWAP_WR<br/>write it back, memory locked"]
+    ALU_DELIVER["ALU_DELIVER<br/>ALU, unary: result and flags"]
+  end
+  subgraph MD["MUL, DIV"]
+    MD_TAKE["MD_TAKE<br/>take NOS and TOS"]
+    MD_START["MD_START"]
+    MD_WAIT["MD_WAIT<br/>the unit works"]
+    MD_DELIVER["MD_DELIVER<br/>two results and flags"]
+  end
+  subgraph ST["ST"]
+    ST_POP["ST_POP<br/>take the value"]
+    ST_DEST["ST_DEST"]
+    ST_STK["ST_STK"]
+    ST_SP["ST_SP<br/>SET_PSP"]
+    ST_COH["ST_COH"]
+    ST_IDLE["ST_IDLE"]
+    ST_WR["ST_WR"]
+  end
+  subgraph CR["CALL, RET, ADDP"]
+    CALL_POP["CALL_POP"]
+    CALL_RA["CALL_RA<br/>push the return address"]
+    CALL_LINK["CALL_LINK<br/>link the frame"]
+    RET_FLUSH["RET_FLUSH"]
+    RET_IDLE["RET_IDLE"]
+    RET_CNT_RD["RET_CNT_RD<br/>RET with a count word"]
+    RET_CNT_WAIT["RET_CNT_WAIT"]
+    RET_LNK_RD["RET_LNK_RD<br/>saved SFP"]
+    RET_LNK_WAIT["RET_LNK_WAIT"]
+    RET_IP_RD["RET_IP_RD<br/>return address"]
+    RET_IP_WAIT["RET_IP_WAIT"]
+    RET_SP["RET_SP<br/>drop the frame"]
+    ADDP_SP["ADDP_SP<br/>sp += i"]
+  end
+  subgraph EX["exceptions and contexts"]
+    UNDO["UNDO<br/>put the popped value back"]
+    ABORT["ABORT<br/>the exception is known"]
+    SW_FLUSH["SW_FLUSH<br/>FLUSH the stack cache"]
+    SW_WAIT["SW_WAIT<br/>cache idle"]
+    SW_PSP["SW_PSP<br/>SET_PSP, swap the contexts"]
+    RESET_SOFT["RESET_SOFT<br/>INVALIDATE, init registers"]
+    RESET_PSP["RESET_PSP<br/>SET_PSP = PSP_INIT"]
+  end
+  NEXT(["next instruction"])
+
+  INIT -->|"cmd.ready"| FETCH
+  NEXT --> FETCH
+  FETCH -->|"req.ready"| FETCH_WAIT
+  FETCH_WAIT -->|"resp.valid<br/>ip += 2"| DECODE
+  DECODE -->|"needs a second word"| EXTRA
+  DECODE -->|"one word"| EXEC
+  DECODE -->|"skipped, one word"| NEXT
+  EXTRA -->|"req.ready"| EXTRA_WAIT
+  EXTRA_WAIT -->|"resp.valid, ip += 2"| EXEC
+  EXTRA_WAIT -->|"skipped"| NEXT
+
+  EXEC -->|"LD, ALU, memory source"| LD_COH
+  EXEC -->|"LD, other source"| LD_DELIVER
+  EXEC -->|"SWAP"| SWAP_TAKE
+  EXEC -->|"ALU, unary"| ALU_DELIVER
+  EXEC -->|"MUL, DIV"| MD_TAKE
+  EXEC -->|"ST"| ST_POP
+  EXEC -->|"CALL"| CALL_POP
+  EXEC -->|"CALL direct"| CALL_RA
+  EXEC -->|"RET"| RET_FLUSH
+  EXEC -->|"ADDP SP"| ADDP_SP
+  EXEC -->|"BRA, JMP, SKIP, SETB, CLRB,<br/>ADDP MBP, MIDX"| NEXT
+  EXEC -->|"RETI (system only)"| SW_FLUSH
+  EXEC -->|"TRAP, user context"| SW_FLUSH
+  EXEC -->|"TRAP, system context"| RESET_SOFT
+
+  LD_COH --> LD_IDLE --> LD_RD --> LD_RD_WAIT
+  LD_RD_WAIT -->|"LD"| LD_DELIVER
+  LD_RD_WAIT -->|"ALU"| ALU_DELIVER
+  LD_RD_WAIT -->|"SWAP"| SWAP_WR
+  SWAP_TAKE --> LD_COH
+  SWAP_WR -->|"req.ready"| LD_DELIVER
+  LD_DELIVER --> NEXT
+  ALU_DELIVER --> NEXT
+  MD_TAKE --> MD_START --> MD_WAIT
+  MD_WAIT -->|"done"| MD_DELIVER
+  MD_DELIVER --> NEXT
+
+  ST_POP --> ST_DEST
+  ST_DEST -->|"TOS, NOS, [sp+2k]"| ST_STK
+  ST_DEST -->|"SP"| ST_SP
+  ST_DEST -->|"memory"| ST_COH
+  ST_DEST -->|"MBP, MIDX, IP, SR,<br/>NULL: directly"| NEXT
+  ST_COH --> ST_IDLE --> ST_WR
+  ST_STK --> NEXT
+  ST_SP --> NEXT
+  ST_WR --> NEXT
+
+  CALL_POP --> CALL_RA --> CALL_LINK --> NEXT
+  RET_FLUSH --> RET_IDLE
+  RET_IDLE -->|"RET with a count"| RET_CNT_RD
+  RET_IDLE -->|"RET #n"| RET_LNK_RD
+  RET_CNT_RD --> RET_CNT_WAIT --> RET_LNK_RD
+  RET_LNK_RD --> RET_LNK_WAIT --> RET_IP_RD --> RET_IP_WAIT --> RET_SP --> NEXT
+  ADDP_SP --> NEXT
+
+  FETCH -.->|"IRQ in user context,<br/>asynchronous write-back fault,<br/>request refused"| ABORT
+  DECODE -.->|"illegal instruction"| ABORT
+  EXTRA -.->|"refused"| ABORT
+  LD -.->|"refused"| ABORT
+  ST -.->|"refused before the pop"| ABORT
+  CR -.->|"refused"| ABORT
+  MD -.->|"stack fill refused,<br/>division by zero"| ABORT
+  ST -.->|"refused after the pop"| UNDO
+  CALL_POP -.->|"refused after the pop"| UNDO
+  UNDO --> ABORT
+
+  ABORT -->|"user context"| SW_FLUSH
+  ABORT -->|"system context"| RESET_SOFT
+  SW_FLUSH --> SW_WAIT
+  SW_WAIT -->|"idle"| SW_PSP
+  SW_WAIT -->|"write-back refused<br/>in the system context"| RESET_SOFT
+  SW_PSP -->|"the other context runs"| NEXT
+  RESET_SOFT --> RESET_PSP -->|"IP = 0, soft reset"| NEXT
+
+  classDef fe fill:#eff6ff,stroke:#2563eb,color:#111827
+  classDef mem fill:#f0fdf4,stroke:#16a34a,color:#111827
+  classDef flow fill:#fefce8,stroke:#ca8a04,color:#111827
+  classDef exc fill:#fef2f2,stroke:#dc2626,color:#111827
+  class FETCH,FETCH_WAIT,DECODE,EXTRA,EXTRA_WAIT,EXEC fe
+  class LD_COH,LD_IDLE,LD_RD,LD_RD_WAIT,LD_DELIVER,ALU_DELIVER,SWAP_TAKE,SWAP_WR,ST_POP,ST_DEST,ST_STK,ST_SP,ST_COH,ST_IDLE,ST_WR mem
+    class MD_TAKE,MD_START,MD_WAIT,MD_DELIVER mem
+  class CALL_POP,CALL_RA,CALL_LINK,RET_FLUSH,RET_IDLE,RET_CNT_RD,RET_CNT_WAIT,RET_LNK_RD,RET_LNK_WAIT,RET_IP_RD,RET_IP_WAIT,RET_SP,ADDP_SP flow
+  class UNDO,ABORT,SW_FLUSH,SW_WAIT,SW_PSP,RESET_SOFT,RESET_PSP exc

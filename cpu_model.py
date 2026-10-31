@@ -95,6 +95,10 @@ def i_unary(op, dd, s):
     return [0xe000 | dd << 8 | s << 7 | op << 3]
 
 
+def i_muldiv(div, signed, s):
+    return [0xe400 | div << 9 | signed << 8 | s << 7]
+
+
 def i_addp(rr, i):
     return [0xd400 | (rr << 8) | (i & 0xff)]
 
@@ -252,6 +256,9 @@ class Ref:
         if grp == 2 and (w >> 10) & 3 == 0:
             self.unary((w >> 3) & 15, (w >> 8) & 3, (w >> 7) & 1)
             return None
+        if grp == 2 and (w >> 10) & 3 == 1 and not w & 0x7f:
+            self.muldiv((w >> 9) & 1, (w >> 8) & 1, (w >> 7) & 1)
+            return None
         if grp == 3 and not w & 0x800:
             return self.call(rel, next_ip)
         if grp == 3:
@@ -285,6 +292,40 @@ class Ref:
             target = self.step(code[pc >> 1:(pc >> 1) + n], nxt)
             pc = nxt if target is None else target
         raise AssertionError('reference run does not finish')
+
+    def muldiv(self, div, signed, s):
+        """
+        NOS and TOS are replaced by the primary (TOS) and the secondary (NOS)
+        result. A division by zero must not get here.
+        """
+        bits = 8 if s else 16
+        mask = (1 << bits) - 1
+        b = self.item(0) & mask
+        a = self.item(1) & mask
+        if signed:
+            a, b = sext(a, bits), sext(b, bits)
+        if div:
+            assert b != 0
+            q = abs(a) // abs(b)
+            if (a < 0) != (b < 0):
+                q = -q
+            r = a - q * b
+            big = signed and q == 1 << (bits - 1)
+            prim, sec = q & mask, r & mask
+        else:
+            p = a * b
+            prim, sec = p & mask, p >> bits & mask
+            if signed:
+                big = p != sext(prim, bits)
+            else:
+                big = sec != 0
+            self.c = int(big)
+        self.v = int(big)
+        self.z = int(prim == 0)
+        self.n = prim >> (bits - 1) & 1
+        self.p = int(bin(prim).count('1') % 2 == 0)
+        self.wr16(self.psp, prim)
+        self.wr16(self.psp + 2, sec)
 
     def unary(self, op, dd, s):
         # the operand is the item the ALU ops use: TOS for dd 0 and 3,
@@ -623,6 +664,22 @@ class Program:
         self.emit(i_unary(op, dd, s), 1 if dd >= 2 else 0)
         return True
 
+    def muldiv_one(self):
+        d = self.depth
+        if d < 2:
+            return False
+        r = self.rng
+        div = r.getrandbits(1)
+        s = r.getrandbits(1)
+        # the divisor is only known while the program runs in the reference;
+        # a function body has no division
+        if div and not (
+            self.live and self.ref.item(0) & (0xff if s else 0xffff)
+        ):
+            div = 0
+        self.emit(i_muldiv(div, r.getrandbits(1), s))
+        return True
+
     def swap_one(self):
         r = self.rng
         d = self.depth
@@ -880,6 +937,9 @@ class Program:
                     self.ld_one()
             case x if x < 0.86:
                 if not self.swap_one():
+                    self.ld_one()
+            case x if x < 0.89:
+                if not self.muldiv_one():
                     self.ld_one()
             case _:
                 while not self.st_one():

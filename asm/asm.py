@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Tiny assembler for the LD and ST instructions of the stack CPU (cpu.py).
 
@@ -39,6 +40,18 @@ Control flow:
                         and under inserts it below TOS, the operand stays.
                         neg and rlc set C Z N V P, rrc C Z N P, the others Z N P.
                         rlc and rrc rotate through the carry.
+    mulu muls divu divs  (.b for 8 bits; no operands)
+                        NOS and TOS are replaced by two results: TOS gets the
+                        primary one, NOS the secondary one. mul: TOS * NOS, low part
+                        in TOS and high part in NOS. div: NOS / TOS, quotient in TOS
+                        and remainder in NOS (truncated toward zero, the remainder
+                        has the sign of the dividend). Byte forms use the low bytes
+                        and give zero-extended bytes. Z N P are those of the primary
+                        result. mul sets C and V when the high part is significant
+                        (it is not 0, or for muls not the sign extension of the low
+                        part); div sets V when the quotient overflows (the most
+                        negative number / -1, the quotient wraps) and keeps C.
+                        A division by zero is fault 4 and nothing changes.
     setb #m / clrb #m   set / clear the status register bits in the mask m
     trap #p             a system call: the system context runs, p (0..63) is in its
                         interrupt ID (the number of class 2). One word, so a trap
@@ -183,6 +196,9 @@ def w_gen(op, dd, s, mode, x, extra=None):
 
 
 UNARY = {'not': 0, 'neg': 1, 'sxt': 2, 'bswap': 3, 'rlc': 4, 'rrc': 5}
+# multiplication and division take no operands: NOS and TOS are replaced by
+# the primary result (TOS) and the secondary one (NOS)
+MULDIV = {'mulu': 0xe400, 'muls': 0xe500, 'divu': 0xe600, 'divs': 0xe700}
 CTL = ('bra', 'call', 'calla', 'jmp', 'ret', 'addp', 'skip', 'setb', 'clrb', 'reti', 'trap')
 CONDITIONS = {
     'eq': 0, 'z': 0, 'ne': 1, 'nz': 1,
@@ -272,6 +288,12 @@ def encode(mnemonic, operands, labels, pc=0):
         if suffix:
             raise AsmError(f'{name} has no size suffix')
         return encode_ctl(name, operands, labels, pc)
+    if name in MULDIV:
+        if suffix not in ('', 'b'):
+            raise AsmError(f'unknown size suffix .{suffix}')
+        if operands:
+            raise AsmError(f'{name} takes no operands')
+        return [MULDIV[name] | (suffix == 'b') << 7]
     if name in UNARY:
         if suffix not in ('', 'b'):
             raise AsmError(f'unknown size suffix .{suffix}')

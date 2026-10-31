@@ -3,6 +3,7 @@ from amaranth.lib.wiring import Component, In, Out, connect, flipped
 
 from alu import ALU, OpCodes
 from memory_port import MemoryPort
+from muldiv import MulDiv
 from memory_select import CPU_ADDR_WIDTH, Space
 from stack_cache import Maint, Shift, StackCache
 
@@ -72,6 +73,7 @@ FAULT_ILLEGAL = 0   # an instruction that does not exist, or RETI in user mode
 FAULT_MEM = 1       # a request of the CPU was refused
 FAULT_STACK = 2     # a fill of the stack cache was refused
 FAULT_WB = 3        # a write-back of the stack cache was refused (asynchronous)
+FAULT_DIV = 4       # division by zero
 
 # the registers of the inactive context and the exception data, as the CPU
 # shows them on its `ctx_*` port (word numbers)
@@ -235,6 +237,14 @@ class CPU(Component):
         # unary operations: 11 10 00 dd s oooo 000, `dd` and `s` as usual
         is_unary = is_ctl & (grp == 2) & (instr[10:12] == 0)
         u_op = instr[3:7]
+
+        # multiplication and division: 11 10 01 d g s 0000000, `d` selects
+        # division, `g` signed numbers and `s` bytes
+        is_muldiv = (
+                is_ctl & (grp == 2) & (instr[10:12] == 1) & (instr[0:7] == 0)
+        )
+        md_div = instr[9]
+        md_signed = instr[8]
         is_call_rel = is_ctl & (grp == 3) & ~instr[11]
         is_misc = is_ctl & (grp == 3) & instr[11]
 
@@ -278,6 +288,7 @@ class CPU(Component):
                 | is_call_abs | is_jmp_abs | is_call_pop
                 # RETI is an illegal instruction in user mode
                 | (is_reti & ~user) | is_trap
+                | is_muldiv
         )
         ok = ok_ld | ok_st | ok_alu | ok_swap | ok_ctl
 
@@ -487,6 +498,9 @@ class CPU(Component):
         # remove NOS. Arithmetic ops set C Z N V P, logical ops only Z N P.
         # A byte result is zero-extended into the destination word.
         m.submodules.alu = alu = ALU()
+        m.submodules.muldiv = md = MulDiv()
+        md_a = Signal(16)       # MUL, DIV: NOS
+        md_b = Signal(16)       # MUL, DIV: TOS
 
         # the destination item: TOS for dd 0 and 3, NOS for dd 1 and 2. The
         # unary operations use the same item as their operand.
@@ -496,6 +510,11 @@ class CPU(Component):
             alu.operand_a.eq(lines[alu_pos]),
             alu.size.eq(s),
             alu.carry_in.eq(sw[0]),
+            md.a.eq(md_a),
+            md.b.eq(md_b),
+            md.div.eq(md_div),
+            md.size.eq(s),
+            md.signed.eq(md_signed),
         ]
         # the unary operations are done by the same ALU: they have no source
         # operand, and RLC is ADC of the item with itself
@@ -704,6 +723,8 @@ class CPU(Component):
                     m.next = 'SWAP_TAKE'
                 with m.Elif(is_unary):
                     m.next = 'ALU_DELIVER'
+                with m.Elif(is_muldiv):
+                    m.next = 'MD_TAKE'
                 with m.Elif(is_st):
                     m.next = 'ST_POP'
                 with m.Elif(is_bra | is_jmp_abs):
@@ -922,6 +943,63 @@ class CPU(Component):
                         m.d.sync += sw[0].eq(alu.carry)
                     with m.If(set_v):
                         m.d.sync += sw[3].eq(alu.overflow)
+                    m.next = 'FETCH'
+
+            # ---- MUL and DIV ----
+            # NOS and TOS go in, two results come out in their place: the
+            # primary one (the low part of a product, the quotient) in TOS
+            # and the secondary one (the high part, the remainder) in NOS.
+            # The operands are taken into registers, the unit works, and
+            # one cache command writes both results and the flags. A
+            # division by zero abandons the instruction before that, with
+            # nothing changed.
+            with m.State('MD_TAKE'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.need.eq(0b0011),
+                ]
+                with m.If(stack.fault):
+                    stack_refused()
+                with m.Elif(cmd.ready):
+                    m.d.sync += [
+                        md_a.eq(stack.d1),
+                        md_b.eq(stack.d0),
+                    ]
+                    m.next = 'MD_START'
+
+            with m.State('MD_START'):
+                m.d.comb += md.start.eq(1)
+                m.next = 'MD_WAIT'
+
+            with m.State('MD_WAIT'):
+                with m.If(md.done):
+                    with m.If(md.zero_div):
+                        abort(ID_FAULT | FAULT_DIV)
+                    with m.Else():
+                        m.next = 'MD_DELIVER'
+
+            with m.State('MD_DELIVER'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.need.eq(0b0011),
+                    cmd.w0_en.eq(1),
+                    cmd.w0_pos.eq(0),
+                    cmd.w0_data.eq(md.primary),
+                    cmd.w1_en.eq(1),
+                    cmd.w1_pos.eq(1),
+                    cmd.w1_data.eq(md.secondary),
+                ]
+                with m.If(stack.fault):
+                    stack_refused()
+                with m.Elif(cmd.ready):
+                    m.d.sync += [
+                        sw[1].eq(md.primary == 0),
+                        sw[2].eq(Mux(s, md.primary[7], md.primary[15])),
+                        sw[3].eq(md.overflow),
+                        sw[4].eq(~md.primary.xor()),
+                    ]
+                    with m.If(~md_div):
+                        m.d.sync += sw[0].eq(md.overflow)
                     m.next = 'FETCH'
 
             # ---- ADDP SP: the same as storing to SP ----

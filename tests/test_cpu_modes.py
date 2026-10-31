@@ -3,10 +3,10 @@ Test for the system and user contexts of cpu.py: TRAP, RETI, exceptions, soft
 reset, the context device, and the asynchronous fault of a write-back of the
 stack cache.
 
-hwtest/hw7_modes.asm, hw8_mmu.asm, hw9_irq.asm, hw10_swap.asm and
-hw11_uart_irq.asm are run on the whole System (CPU, arbiter, MMU, memory
-select, peripheral bus with the context device, the MMU registers, the
-interrupt controller and the timer).
+hwtest/hw7_modes.asm, hw8_mmu.asm, hw9_irq.asm, hw10_swap.asm,
+hw11_uart_irq.asm and hw12_muldiv.asm are run on the whole System (CPU,
+arbiter, MMU, memory select, peripheral bus with the context device, the MMU
+registers, the interrupt controller and the timer).
 The flash (holding the program) and the SDRAM are behavioral models with
 random ready and 1..4 cycles of read latency; the UART is a register that
 logs what is written to it. The test expects the programs' output.
@@ -151,6 +151,10 @@ def test_cpu_modes():
         out, seen = run_program('hw10_swap.asm', seed, 4000, p_ready)
         assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
         assert seen['swaps'] == 7, seen
+    # MUL and DIV: results, flags, bytes, the overflow, a division by zero
+    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+        out, seen = run_program('hw12_muldiv.asm', seed, 6000, p_ready)
+        assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
     # the UART receiver interrupts: the bytes are echoed by the handler, a
     # '?' is answered; two bytes come at the same time
     received = [(4000, 97), (4000, 98), (6000, 99), (9000, 63), (9001, 120)]
