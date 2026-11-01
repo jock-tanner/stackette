@@ -189,7 +189,7 @@ b:      ld push, #0x1234
         st [0xf000], pop
 
 ; I: st [tos], pop does not exist: the illegal instruction
-        .word 0xa670
+        .word 0xa616
 
 fail:   bra fail
 

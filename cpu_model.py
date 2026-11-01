@@ -63,9 +63,54 @@ def i_pfp(op, dd, s, f):
     return [(1 << 14) | (op << 10) | (dd << 8) | (s << 7) | (f & 0x7f)]
 
 
-def i_gen(op, dd, s, mode, x, extra=None):
-    w = (2 << 14) | (op << 10) | (dd << 8) | (s << 7) | (mode << 4) | x
+def i_gen(op, dd, s, mode, x, extra=None, e=0):
+    """
+    An instruction of the GENERAL format, with the operand named by the
+    logical mode: 0 register x, 1 2 3 [mbp+midx] and its post-increment and
+    pre-decrement forms, 4 #imm16, 5 [abs], 6 [sp+k] (k = x), 7 [tos]. `e`
+    (or the bit 0 of x in the modes 1 2 3 7) is the sign-extension flag of
+    byte loads. The operand field is a prefix code, see gen_operand.
+    """
+    if mode == 0:
+        f = x
+    elif mode in (1, 2, 3):
+        f = 0x10 | (mode - 1) << 1 | (x & 1 | e)
+    elif mode == 7:
+        f = 0x10 | 3 << 1 | (x & 1 | e)
+    elif mode == 5:
+        f = 0x20 | (x & 1 | e)
+    elif mode == 4:
+        f = 0x22
+    else:
+        f = 0x40 | x << 1 | e
+    w = (2 << 14) | (op << 10) | (dd << 8) | (s << 7) | f
     return [w] if extra is None else [w, extra & 0xffff]
+
+
+def gen_operand(w):
+    """
+    The operand field of a GENERAL format instruction (its low 7 bits):
+    (logical mode, x, e), or None if there is no such operand.
+        000 rrrr    register r
+        001 0 mm e  mm: 0 [mbp+midx], 1 [mbp+midx++], 2 [mbp+--midx],
+                    3 [tos]
+        01 0000 e   [abs16]
+        01 0001 0   #imm16
+        1 kkkkk e   [sp+k]
+    """
+    f = w & 0x7f
+    if f >> 4 == 0:
+        return 0, f & 15, 0
+    if f >> 3 == 0b0010:
+        kind = (f >> 1) & 3
+        return (7 if kind == 3 else kind + 1), 0, f & 1
+    if f >> 1 == 0b010000:
+        return 5, 0, f & 1
+    if f == 0b0100010:
+        return 4, 0, 0
+    if f >> 6:
+        return 6, (f >> 1) & 31, f & 1
+    return None
 
 
 # control format 11
@@ -205,7 +250,7 @@ class Ref:
         """Words in the instruction that starts with w."""
         fmt = w >> 14
         if fmt == 2:
-            return 2 if (w >> 4) & 7 in (4, 5) else 1
+            return 2 if gen_operand(w) is not None and gen_operand(w)[0] in (4, 5) else 1
         if fmt == 3 and (w >> 12) & 3 == 3 and w & 0x800:
             return 2 if (w >> 6) & 31 in (MISC_CALL_ABS, MISC_JMP_ABS) else 1
         return 1
@@ -412,8 +457,7 @@ class Ref:
             return sext(w & 0xff, 8) & 0xffff
         if fmt == 1:
             return self.rd((self.sfp + 2 * sext(w & 0x7f, 7)) & 0xffff, s)
-        mode = (w >> 4) & 7
-        x = w & 15
+        mode, x, e = gen_operand(w)
         if mode == 0:
             regs = {
                 REG_TOS: self.item(0),
@@ -426,21 +470,22 @@ class Ref:
                 REG_IP: next_ip,
             }
             return regs[x] & (0xff if s else 0xffff)
-        if mode in (1, 2, 3):
-            ea = self.ea_ptr(mode, s)
-            v = self.rd(ea, s)
-            if s and (x & 1) and v & 0x80:
-                v |= 0xff00
-            self.ptr_after(mode, s)
-            return v
         if mode == 4:
             return words[1] & (0xff if s else 0xffff)
-        if mode == 5:
-            return self.rd(words[1], s)
-        if mode == 7:
-            assert x == 0
-            return self.rd(self.item(0), s)
-        return self.rd((self.psp + 2 * x) & 0xffff, s)  # mode 6
+        if mode in (1, 2, 3):
+            ea = self.ea_ptr(mode, s)
+        elif mode == 5:
+            ea = words[1]
+        elif mode == 7:
+            ea = self.item(0)
+        else:
+            ea = (self.psp + 2 * x) & 0xffff
+        v = self.rd(ea, s)
+        if s and e and v & 0x80:
+            v |= 0xff00
+        if mode in (1, 2, 3):
+            self.ptr_after(mode, s)
+        return v
 
     def ld_put(self, dd, v):
         if dd == 0:
@@ -460,7 +505,7 @@ class Ref:
         """TOS or NOS (dd 0, 1) and a memory word or byte exchange values."""
         w = words[0]
         old = self.item(dd)
-        mode = (w >> 4) & 7
+        mode, x, _ = (0, 0, 0) if fmt == 1 else gen_operand(w)
         if fmt == 1:
             ea = (self.sfp + 2 * sext(w & 0x7f, 7)) & 0xffff
         elif mode in (1, 2, 3):
@@ -470,7 +515,7 @@ class Ref:
         elif mode == 7:
             ea = self.item(0)
         else:
-            ea = (self.psp + 2 * (w & 15)) & 0xffff     # mode 6, k >= 4
+            ea = (self.psp + 2 * x) & 0xffff     # mode 6, k >= 4
         new = self.rd(ea, s)
         self.wr(ea, s, old)
         if fmt == 2 and mode in (1, 2, 3):
@@ -482,8 +527,7 @@ class Ref:
         if fmt == 1:
             self.wr((self.sfp + 2 * sext(w & 0x7f, 7)) & 0xffff, s, v)
             return
-        mode = (w >> 4) & 7
-        x = w & 15
+        mode, x, _ = gen_operand(w)
         if mode == 0:
             v8 = v & 0xff if s else v
             if x == REG_TOS:
@@ -629,10 +673,11 @@ class Program:
         if kind == 'ptr':
             return i_gen(op, dd, s, r.choice([1, 2, 3]), s and r.getrandbits(1))
         if kind == 'abs':
-            return i_gen(op, dd, s, 5, 0, self.addr_far())
+            return i_gen(op, dd, s, 5, 0, self.addr_far(), s and r.getrandbits(1))
         if d < 1:
             return None
-        return i_gen(op, dd, s, 6, r.randrange(min(d, 16)))
+        k = r.randrange(min(d, 16))
+        return i_gen(op, dd, s, 6, k, None, k >= 4 and s and r.getrandbits(1))
 
     def ld_one(self, neutral=False):
         r = self.rng

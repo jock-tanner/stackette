@@ -13,8 +13,9 @@ Syntax, one instruction per line; `;` starts a comment, `name:` defines a label:
     st DST, DD          DD: tos, nos, pop, under
     add adc sub sbc and or xor bic  DD, SRC
                         DD: tos, nos, push, under; takes SRC like ld
-    ld.b / st.b         8-bit access (ld.bs: byte load, sign-extended, only
-                        from [mbp+midx], [mbp+midx++] and [mbp+--midx])
+    ld.b / st.b         8-bit access (ld.bs: byte load, sign-extended, only from
+                        memory through a pointer: [mbp+midx], [mbp+midx++],
+                        [mbp+--midx], [tos], and from [abs] and [sp+k], k >= 4)
     lea DD, [pfp+n]     DD: tos, nos, push, under; the address SFP+n (n even, -128..126)
                         goes on the stack like a loaded value. The flags are not
                         changed.
@@ -98,7 +99,7 @@ Operands (st takes no immediate):
     tos nos mbp midx sp null sr ip  register (sr: the status register, see below)
     [mbp+midx]  [mbp+midx++]  [mbp+--midx]      pointer, post-increment, pre-decrement
     [expr]              absolute 16-bit byte address
-    [sp+k]              stack item k (0 = TOS), k = 0..15
+    [sp+k]              stack item k (0 = TOS), k = 0..31
     [pfp+n]             frame-relative, n = even byte offset -128..126
 
 expr: a number (decimal, 0x hex, 'c' character) or a label.
@@ -204,8 +205,18 @@ def w_pfp(op, dd, s, f):
     return [(1 << 14) | (op << 10) | (dd << 8) | (s << 7) | (f & 0x7f)]
 
 
-def w_gen(op, dd, s, mode, x, extra=None):
-    w = (2 << 14) | (op << 10) | (dd << 8) | (s << 7) | (mode << 4) | x
+# the operand field of the GENERAL format, its low 7 bits (`e` makes a byte
+# load sign-extending):
+#   000 rrrr    register r
+#   001 0 mm e  mm: 0 [mbp+midx], 1 [mbp+midx++], 2 [mbp+--midx], 3 [tos]
+#   01 0000 e   [abs16]
+#   01 0001 0   #imm16
+#   1 kkkkk e   [sp+k]
+F_REG, F_PTR, F_ABS, F_IMM16, F_SP = 0, 0x10, 0x20, 0x22, 0x40
+
+
+def w_gen(op, dd, s, field, extra=None):
+    w = (2 << 14) | (op << 10) | (dd << 8) | (s << 7) | field
     return [w] if extra is None else [w, extra & 0xffff]
 
 
@@ -366,10 +377,14 @@ def encode(mnemonic, operands, labels, pc=0):
         raise AsmError(f'{dd_name!r} is not a stack operand of {name} ({", ".join(dds)})')
     dd = dds[dd_name]
     kind, arg = operand
-    if suffix == 'bs' and (name != 'ld' or kind != 'ptr'):
+    if suffix == 'bs' and (
+        name != 'ld'
+        or kind not in ('ptr', 'tos', 'abs', 'sp')
+        or (kind == 'sp' and val(arg) < 4)
+    ):
         raise AsmError(
-            'the .bs form exists only for ld with [mbp+midx], '
-            '[mbp+midx++] and [mbp+--midx]'
+            'the .bs form exists only for ld from memory through a pointer '
+            '([mbp+midx] forms, [tos]), [abs] and [sp+k] with k >= 4'
         )
     if name == 'swap':
         if dd > 1:
@@ -384,22 +399,22 @@ def encode(mnemonic, operands, labels, pc=0):
         hi = 255 if name in ALU_OPS[4:] else 127
         if is_number(arg) and not s and lo <= v <= hi:
             return w_imm8(op, dd, v)
-        return w_gen(op, dd, s, 4, 0, v)
+        return w_gen(op, dd, s, F_IMM16, v)
     if kind == 'reg':
-        return w_gen(op, dd, s, 0, arg)
+        return w_gen(op, dd, s, F_REG | arg)
     if kind == 'ptr':
-        return w_gen(op, dd, s, arg, sx if name == 'ld' else 0)
+        return w_gen(op, dd, s, F_PTR | (arg - 1) << 1 | sx)
     if kind == 'tos':
         if name == 'st' and dd not in (1, 3):
             raise AsmError('st [tos] takes its value from nos or under')
-        return w_gen(op, dd, s, 7, 0)
+        return w_gen(op, dd, s, F_PTR | 3 << 1 | sx)
     if kind == 'abs':
-        return w_gen(op, dd, s, 5, 0, val(arg))
+        return w_gen(op, dd, s, F_ABS | sx, val(arg))
     if kind == 'sp':
         k = val(arg)
-        if not 0 <= k <= 15:
-            raise AsmError('[sp+k]: k must be 0..15')
-        return w_gen(op, dd, s, 6, k)
+        if not 0 <= k <= 31:
+            raise AsmError('[sp+k]: k must be 0..31')
+        return w_gen(op, dd, s, F_SP | k << 1 | sx)
     if kind == 'pfp':
         n = val(arg)
         if n % 2 or not -128 <= n <= 126:

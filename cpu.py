@@ -29,14 +29,6 @@ OP_LEA = 0b1011
 FMT_IMM8 = 0
 FMT_PFP = 1
 FMT_GEN = 2
-MODE_REG = 0
-MODE_PTR = 1
-MODE_PTR_INC = 2
-MODE_PTR_DEC = 3
-MODE_IMM16 = 4
-MODE_ABS = 5
-MODE_SP = 6
-MODE_TOS = 7
 REG_TOS = 0
 REG_NOS = 1
 REG_MBP = 2
@@ -211,8 +203,18 @@ class CPU(Component):
         fmt = instr[14:16]
         op = instr[10:14]
         dd = instr[8:10]
-        mode = instr[4:7]
+        # the operand field of the GENERAL format, the low 7 bits, is a
+        # prefix code (`s` is bit 7, outside it):
+        #   000 rrrr    register r
+        #   001 0 mm e  mm: 0 [mbp+midx], 1 [mbp+midx++], 2 [mbp+--midx],
+        #               3 [tos]; e: a byte load sign-extends
+        #   01 0000 e   [abs16], e as above
+        #   01 0001 0   #imm16
+        #   1 kkkkk e   [sp+k]: item k of the stack, memory from k = 4 on
+        #               (e as above, for k < 4 it must be 0)
+        # the other codes are illegal
         x = instr[0:4]
+        e = instr[0]
         s = Signal()
         m.d.comb += s.eq((fmt != FMT_IMM8) & instr[7])
 
@@ -267,30 +269,40 @@ class CPU(Component):
         # NOP is 0xf800, and nothing else of its op
         is_nop = is_misc & (misc_op == MISC_NOP) & (instr[0:6] == 0)
         is_call_direct = is_call_rel | is_call_abs
-        reg_mode = is_gen & (mode == MODE_REG)
-        ptr_mode = is_gen & (
-                (mode == MODE_PTR)
-                | (mode == MODE_PTR_INC)
-                | (mode == MODE_PTR_DEC)
-        )
-        imm16_mode = is_gen & (mode == MODE_IMM16)
-        abs_mode = is_gen & (mode == MODE_ABS)
-        sp_mode = is_gen & (mode == MODE_SP)
-        sp_stack = sp_mode & (x < 4)
-        sp_mem = sp_mode & (x >= 4)
+        op_field = instr[0:7]
+        reg_mode = is_gen & (op_field[4:7] == 0b000)
+        ptr_group = is_gen & (op_field[3:7] == 0b0010)
+        ptr_kind = op_field[1:3]
+        ptr_mode = ptr_group & (ptr_kind != 3)
+        ptr_inc = ptr_group & (ptr_kind == 1)
+        ptr_dec = ptr_group & (ptr_kind == 2)
+        # [tos]: the address is TOS
+        tos_ptr = ptr_group & (ptr_kind == 3)
+        abs_mode = is_gen & (op_field[1:7] == 0b010000)
+        imm16_mode = is_gen & (op_field == 0b0100010)
+        sp_mode = is_gen & op_field[6]
+        sp_k = op_field[1:6]
+        sp_stack = sp_mode & (sp_k < 4)
+        sp_mem = sp_mode & (sp_k >= 4)
         needs_extra = imm16_mode | abs_mode | is_call_abs | is_jmp_abs
-        # [tos]: the address is TOS (mode 7, x 0, the rest of x is reserved)
-        tos_ptr = is_gen & (mode == MODE_TOS) & (x == 0)
-        mem_operand = (is_pfp & ~is_lea) | ptr_mode | abs_mode | sp_mem | tos_ptr
-        ok_ld = is_ld & ~(is_gen & (mode == MODE_TOS) & ~tos_ptr)
-        # ST through [tos] takes its value from NOS: `nos` or `under`
-        ok_st = is_st & ~(
-                is_gen & (
-                    (mode == MODE_IMM16)
-                    | ((mode == MODE_TOS) & ~(tos_ptr & dd[0]))
+        mem_operand = (
+                (is_pfp & ~is_lea) | ptr_mode | abs_mode | sp_mem | tos_ptr
+        )
+        # the operands that exist: an item of the stack has no sign flag
+        gen_ok = (
+                reg_mode | ptr_group | abs_mode | imm16_mode
+                | (sp_mode & ~(sp_stack & e))
+        )
+        ok_ld = is_ld & (~is_gen | gen_ok)
+        # ST has no immediate, and through [tos] it takes its value from NOS:
+        # `nos` or `under`
+        ok_st = is_st & (
+                ~is_gen | (
+                    (gen_ok & ~imm16_mode & ~tos_ptr)
+                    | (tos_ptr & dd[0])
                 )
         )
-        ok_alu = is_alu & ~(is_gen & (mode == MODE_TOS) & ~tos_ptr)
+        ok_alu = is_alu & (~is_gen | gen_ok)
         ok_lea = is_lea & ~instr[7]
         # SWAP exchanges TOS or NOS with a word or a byte of memory
         ok_swap = is_swap & ~dd[1] & mem_operand
@@ -321,12 +333,12 @@ class CPU(Component):
         midx_next = Signal(16)
         m.d.comb += [
             midx_pre.eq(midx - size),
-            midx_eff.eq(Mux(mode == MODE_PTR_DEC, midx_pre, midx)),
+            midx_eff.eq(Mux(ptr_dec, midx_pre, midx)),
             midx_next.eq(midx),
         ]
-        with m.If(ptr_mode & (mode == MODE_PTR_INC)):
+        with m.If(ptr_inc):
             m.d.comb += midx_next.eq(midx + size)
-        with m.Elif(ptr_mode & (mode == MODE_PTR_DEC)):
+        with m.Elif(ptr_dec):
             m.d.comb += midx_next.eq(midx_pre)
 
         ea = Signal(16)
@@ -339,7 +351,7 @@ class CPU(Component):
         with m.Elif(tos_ptr):
             m.d.comb += ea.eq(ptr)
         with m.Else():
-            m.d.comb += ea.eq(stack.psp + (x << 1))
+            m.d.comb += ea.eq(stack.psp + (sp_k << 1))
 
         # byte distance from the cached stack window’s base to the effective
         # address: (ea - psp) modulo 2^16
@@ -390,8 +402,8 @@ class CPU(Component):
         # one-hot mask for the stack item picked by [sp+2k] with k from 0 to 3
         sp_need = Signal(4)
         m.d.comb += [
-            sp_val.eq(lines[x[0:2]]),
-            sp_need.eq(need_of(x[0:2])),
+            sp_val.eq(lines[sp_k[0:2]]),
+            sp_need.eq(need_of(sp_k[0:2])),
         ]
 
         # which stack item the source reads
@@ -442,7 +454,7 @@ class CPU(Component):
         )
 
         # sign extension flag of byte loads through pointers
-        sx = ptr_mode & s & x[0] & ~is_swap
+        sx = (ptr_mode | tos_ptr | abs_mode | sp_mem) & s & e & ~is_swap
         byte = Signal(8)
         m.d.comb += byte.eq(Mux(lane, resp.data[8:16], resp.data[0:8]))
 
@@ -452,7 +464,7 @@ class CPU(Component):
         st_item = Signal(16)
         st_need = Signal(4)
         m.d.comb += [
-            st_pos.eq(Mux(reg_mode, x[0], x[0:2])),
+            st_pos.eq(Mux(reg_mode, x[0], sp_k[0:2])),
             st_item.eq(lines[st_pos]),
             st_need.eq(need_of(st_pos)),
         ]

@@ -145,7 +145,7 @@ f1:     ld push, #70            ; 'F'
         st [0xf000], pop
 
 ; G: swap with push (dd = 2) does not exist: the illegal instruction
-g:      .word 0xaa50, 0x5000
+g:      .word 0xaa20, 0x5000
 
 stop:   bra stop
 
