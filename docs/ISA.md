@@ -11,7 +11,11 @@ has two separate stacks: return stack, and parameter stack.
 
 Instead of general purpose registers, **Stackette** uses a small set of
 highly specialized registers, with accumulators doubling as a parameter stack
-top elements.
+elements, namely: Top-of-Stack (TOS) and Next-of-Stack (NOS).
+
+Currently, TOS and NOS implemented as a part of 4-word cache that follows the
+stack pointer (PSP), so a lot of stack primitives don't do memory access and/or
+really boils down to cache lines renaming.  
 
 Return stack used only for holding return addresses.
 
@@ -43,19 +47,27 @@ Return stack used only for holding return addresses.
 
 ### Memory Management Unit
 
-MMU is tightly coupled with the other elements of **Stackette**'s design.
+MMU is tightly coupled with the other elements of **Stackette**'s architecture.
 
 The machine has four address spaces, up to 64 KiB each:
-- code (addressed by IP)
+- code (addressed by IP),
 - return stack (RSP),
-- parameter stack (PSP and SFP),
+- parameter stack (PSP, SFP, and TOS),
 - data (MBP, with or without MIDX, or by absolute addresses).
  
-The MMU maps 4 KiB pages to 28-bit physical
-addresses, with separate maps for the system and the user context.
+The MMU maps 4 KiB pages to 28-bit physical addresses, with separate maps for the 
+system and the user context.
 
-Default map of this SoC: page 0 is flash, data page 15 is the peripherals,
-the other pages are RAM.
+Default virtual memory map of this SoC: page 0 is flash, data page 15 is the
+peripherals, the other pages are RAM.
+
+The physical page layout is this:
+- SDRAM is pages 0..0x1fff,
+- flash is pages 0x2000..0x20ff,
+- peripherals are pages 0x8000..0xffff.
+
+Pages 0x2100..0x7fff have no memory, so a request to them is a fault. The CPU takes
+it as fault number 1 (request refused), or number 2 for a stack-cache fill.
 
 ## Instruction formats
 
@@ -126,7 +138,8 @@ instructions extends byte operands with zero.
 
 Everything else is an illegal instruction.
 
-**MUL/DIV** operates on TOS and NOS with stack depth unchanged. Location of operands and result: 
+**MUL/DIV** operates on TOS and NOS with stack depth unchanged. Location of
+operands and result: 
 
 | MUL | Before       | After               |
 |-----|--------------|---------------------|
@@ -142,9 +155,10 @@ Division by zero is fault 4, NOS and TOS remain unchanged.
 
 ## Flags and conditions
 
-LD, ST, SWAP do not change flags. ALU ops set Z N P, and C V for arithmetic.
+LD, ST, SWAP do not change flags. ALU ops set Z, N, P, and C, V for arithmetic.
 MUL sets C and V when the high part is significant; DIV sets V on signed
-overflow and keeps C. After `sub`/`sbc`, C means no borrow.
+overflow and keeps C. After `SUB`/`SBC`, C means no borrow, unlike PDP-11 or x86,
+but similar to MOS 6502, ARM, or PowerPC.
 
 | `cc` | Mnemonic name | Holds when...   |
 |------|---------------|-----------------|
@@ -165,19 +179,20 @@ overflow and keeps C. After `sub`/`sbc`, C means no borrow.
 | 14   | PE            | P               |
 | 15   | PO            | not P           |
 
-`SKIP` is the only conditional instruction. 
+`SKIP cc` is the only conditional instruction.
 
 ## Calls and Returns
 
 There are two categories of calling conventions, depending on caller or callee
 doing stack cleanup. When stack is cleaned up by the caller, each call is
 followed by the same stack correction code, which is a waste of program space.
-When stack is cleaned up by the callee, it is unknown how many parameters were
-passed by the caller, which is complicates variadic function support.
+When stack is cleaned up by the callee, it is unknown at the time how many
+parameters were passed by the caller, which is complicates variadic function
+support.
 
 **Stackette** ISA is aimed at the sweet spot:
-- `call` pushes the return address on the return stack and the caller's SFP 
-  on the parameter stack; SFP then points at it, arguments are above it;
+- `call` pushes the return address on the return stack and the caller's PFP 
+  on the parameter stack; SFP then loads in PFP, arguments are above it;
 - `ret #n` drops n argument words;
 - `ret` takes the count from `[sfp+2]` (a count word, counting itself, pushed
   last), for variable argument lists.
@@ -186,7 +201,7 @@ passed by the caller, which is complicates variadic function support.
 
 System and user contexts have their own IP, RSP, SFP, MBP, MIDX, SR, PSP and
 MMU map; the stack cache is flushed on a switch. Power-up and soft reset start
-the system context at address 0. `reti` (system only) runs the user context.
+the system context at address 0. `RETI` (system only) runs the user context.
 
 The system context runs on reset, when the user context traps, faults, or is
 interrupted. The cause is in the ID register: class in bits 7:6, number in 5:0.
