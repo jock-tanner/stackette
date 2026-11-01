@@ -4,8 +4,8 @@ reset, the context device, and the asynchronous fault of a write-back of the
 stack cache.
 
 hwtest/hw7_modes.asm, hw8_mmu.asm, hw9_irq.asm, hw10_swap.asm,
-hw11_uart_irq.asm and hw12_muldiv.asm are run on the whole System (CPU,
-arbiter, MMU, memory select, peripheral bus with the context device, the MMU
+hw11_uart_irq.asm, hw12_muldiv.asm and hw13_lea_ptr.asm are run on the whole
+System (CPU, arbiter, MMU, memory select, peripheral bus with the context device, the MMU
 registers, the interrupt controller and the timer).
 The flash (holding the program) and the SDRAM are behavioral models with
 random ready and 1..4 cycles of read latency; the UART is a register that
@@ -157,6 +157,10 @@ def test_cpu_modes():
     for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
         out, seen = run_program('hw12_muldiv.asm', seed, 6000, p_ready)
         assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
+    # LEA and [tos]: addresses of frame items, pointers on the stack
+    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+        out, seen = run_program('hw13_lea_ptr.asm', seed, 8000, p_ready)
+        assert out == b'ABCDEFGHI', f'seed {seed}: the output is {out!r}'
     # the UART receiver interrupts: the bytes are echoed by the handler, a
     # '?' is answered; two bytes come at the same time
     received = [(4000, 97), (4000, 98), (6000, 99), (9000, 63), (9001, 120)]
@@ -175,6 +179,7 @@ def test_cpu_modes():
         ('hw8_mmu.asm', b'ABCDEFG', 16000, ()),
         ('hw10_swap.asm', b'ABCDEFG', 8000, ()),
         ('hw12_muldiv.asm', b'ABCDEFG', 12000, ()),
+        ('hw13_lea_ptr.asm', b'ABCDEFGHI', 16000, ()),
         ('hw11_uart_irq.asm', b'>abcYx', 28000, received),
         ('hw9_irq.asm', b'ABCDE', 120000, ()),
     ):

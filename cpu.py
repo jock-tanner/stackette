@@ -25,6 +25,7 @@ OP_BIC = 0b0111
 OP_LD = 0b1000
 OP_ST = 0b1001
 OP_SWAP = 0b1010
+OP_LEA = 0b1011
 FMT_IMM8 = 0
 FMT_PFP = 1
 FMT_GEN = 2
@@ -35,6 +36,7 @@ MODE_PTR_DEC = 3
 MODE_IMM16 = 4
 MODE_ABS = 5
 MODE_SP = 6
+MODE_TOS = 7
 REG_TOS = 0
 REG_NOS = 1
 REG_MBP = 2
@@ -193,6 +195,7 @@ class CPU(Component):
                             # (immediate value or absolute address)
         val = Signal(16)    # the operand in transit
         swapval = Signal(16)    # SWAP: the stack item that goes to memory
+        ptr = Signal(16)        # [tos]: the address, taken from TOS
         lane = Signal()     # address bit 0 of a byte load
         link = Signal(16)   # the caller's frame pointer, read by RET
         istart = Signal(16, init=IP_INIT)   # where the instruction being
@@ -220,6 +223,9 @@ class CPU(Component):
         is_st = (op == OP_ST) & (fmt != 3) & (fmt != FMT_IMM8)
         is_alu = (op < OP_LD) & (fmt != 3)
         is_swap = (op == OP_SWAP) & ((fmt == FMT_PFP) | (fmt == FMT_GEN))
+        # LEA: the address of a frame item, SFP + 2*simm7 as in a PFP
+        # operand, goes on the stack like a loaded value (`s` must be 0)
+        is_lea = (op == OP_LEA) & (fmt == FMT_PFP)
 
         # AND OR XOR BIC; only looked at for ALU ops, so one bit is enough
         is_logic = op[2]
@@ -273,10 +279,19 @@ class CPU(Component):
         sp_stack = sp_mode & (x < 4)
         sp_mem = sp_mode & (x >= 4)
         needs_extra = imm16_mode | abs_mode | is_call_abs | is_jmp_abs
-        mem_operand = is_pfp | ptr_mode | abs_mode | sp_mem
-        ok_ld = is_ld & ~(is_gen & (mode == 7))
-        ok_st = is_st & ~(is_gen & ((mode == MODE_IMM16) | (mode == 7)))
-        ok_alu = is_alu & ~(is_gen & (mode == 7))
+        # [tos]: the address is TOS (mode 7, x 0, the rest of x is reserved)
+        tos_ptr = is_gen & (mode == MODE_TOS) & (x == 0)
+        mem_operand = (is_pfp & ~is_lea) | ptr_mode | abs_mode | sp_mem | tos_ptr
+        ok_ld = is_ld & ~(is_gen & (mode == MODE_TOS) & ~tos_ptr)
+        # ST through [tos] takes its value from NOS: `nos` or `under`
+        ok_st = is_st & ~(
+                is_gen & (
+                    (mode == MODE_IMM16)
+                    | ((mode == MODE_TOS) & ~(tos_ptr & dd[0]))
+                )
+        )
+        ok_alu = is_alu & ~(is_gen & (mode == MODE_TOS) & ~tos_ptr)
+        ok_lea = is_lea & ~instr[7]
         # SWAP exchanges TOS or NOS with a word or a byte of memory
         ok_swap = is_swap & ~dd[1] & mem_operand
 
@@ -293,7 +308,7 @@ class CPU(Component):
                 | (is_reti & ~user) | is_trap
                 | is_muldiv | is_nop
         )
-        ok = ok_ld | ok_st | ok_alu | ok_swap | ok_ctl
+        ok = ok_ld | ok_st | ok_alu | ok_swap | ok_lea | ok_ctl
 
         size = Signal(2)  # value to step midx
         m.d.comb += size.eq(Mux(s, 1, 2))
@@ -321,6 +336,8 @@ class CPU(Component):
             m.d.comb += ea.eq(extra)
         with m.Elif(ptr_mode):
             m.d.comb += ea.eq(mbp + midx_eff)
+        with m.Elif(tos_ptr):
+            m.d.comb += ea.eq(ptr)
         with m.Else():
             m.d.comb += ea.eq(stack.psp + (x << 1))
 
@@ -400,7 +417,9 @@ class CPU(Component):
         # the value LD delivers: a memory value was already formed (and
         # sign-extended if asked); the others are masked for 8-bit
         src = Signal(16)
-        with m.If(mem_operand):
+        with m.If(is_lea):
+            m.d.comb += src.eq(ea)
+        with m.Elif(mem_operand):
             m.d.comb += src.eq(val)
         with m.Elif(s):
             m.d.comb += src.eq(src_raw & 0xff)
@@ -714,7 +733,12 @@ class CPU(Component):
                         m.next = 'EXEC'
 
             with m.State('EXEC'):
-                with m.If(is_ld | is_alu):
+                with m.If(tos_ptr & (is_ld | is_alu | is_st | is_swap)):
+                    # the address in TOS is taken before anything else
+                    m.next = 'PTR_TAKE'
+                with m.Elif(is_lea):
+                    m.next = 'LD_DELIVER'
+                with m.Elif(is_ld | is_alu):
                     # the source is fetched the same way for LD and the ALU
                     with m.If(mem_operand):
                         m.next = 'LD_COH'
@@ -835,6 +859,25 @@ class CPU(Component):
             # goes to the stack item like an LD does, which cannot fault
             # because it needs no line from memory: so after the write
             # nothing can abandon the instruction.
+            # [tos]: the address is TOS, taken into `ptr` before the
+            # instruction does anything to the stack, and then it goes on as
+            # with any other memory operand
+            with m.State('PTR_TAKE'):
+                m.d.comb += [
+                    cmd.valid.eq(1),
+                    cmd.need.eq(0b0001),
+                ]
+                with m.If(stack.fault):
+                    stack_refused()
+                with m.Elif(cmd.ready):
+                    m.d.sync += ptr.eq(stack.d0)
+                    with m.If(is_st):
+                        m.next = 'ST_POP'
+                    with m.Elif(is_swap):
+                        m.next = 'SWAP_TAKE'
+                    with m.Else():
+                        m.next = 'LD_COH'
+
             with m.State('SWAP_TAKE'):
                 m.d.comb += [
                     cmd.valid.eq(1),
@@ -1426,7 +1469,7 @@ class CPU(Component):
 
 
 class CPUTop(Elaboratable):
-    def __init__(self, *, mmu_sync=True):
+    def __init__(self, *, mmu_sync=False):
         # the MMU with synchronous read ports: block RAM instead of LUTs, one
         # more clock for every memory access (see mmu.py)
         self.mmu_sync = mmu_sync
@@ -1466,8 +1509,11 @@ class CPUTop(Elaboratable):
 if __name__ == '__main__':
     from amaranth_boards.de0nano import DE0NanoPlatform
 
-    platform = DE0NanoPlatform()
-    platform.build(
+    # the system clock comes from the PLL, so the timing analyzer has to be
+    # told to derive the clocks of the PLL outputs from its settings:
+    # without that they have no constraints (derive_pll_clocks), and Quartus
+    # warns about it (332056)
+    DE0NanoPlatform().build(
         CPUTop(),
         do_program=True,
         add_constraints='derive_pll_clocks\nderive_clock_uncertainty\n',

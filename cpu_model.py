@@ -24,6 +24,7 @@ OP_ADD, OP_ADC, OP_SUB, OP_SBC, OP_AND, OP_OR, OP_XOR, OP_BIC = range(8)
 OP_LD = 8
 OP_ST = 9
 OP_SWAP = 10
+OP_LEA = 11
 U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC = range(6)
 REG_TOS = 0
 REG_NOS = 1
@@ -52,6 +53,10 @@ def sext(v, bits):
 
 def i_imm8(op, dd, imm):
     return [(op << 10) | (dd << 8) | (imm & 0xff)]
+
+
+def i_lea(dd, f):
+    return i_pfp(OP_LEA, dd, 0, f)
 
 
 def i_pfp(op, dd, s, f):
@@ -173,7 +178,9 @@ class Ref:
         if fmt == 3:
             return self.ctl(words, next_ip)
         s = (w >> 7) & 1 if fmt else 0
-        if op == OP_LD:
+        if op == OP_LEA and fmt == 1:
+            self.ld_put(dd, (self.sfp + 2 * sext(w & 0x7f, 7)) & 0xffff)
+        elif op == OP_LD:
             v = self.ld_src(words, fmt, s, next_ip)
             self.ld_put(dd, v)
         elif OP_ADD <= op <= OP_BIC:
@@ -430,6 +437,9 @@ class Ref:
             return words[1] & (0xff if s else 0xffff)
         if mode == 5:
             return self.rd(words[1], s)
+        if mode == 7:
+            assert x == 0
+            return self.rd(self.item(0), s)
         return self.rd((self.psp + 2 * x) & 0xffff, s)  # mode 6
 
     def ld_put(self, dd, v):
@@ -457,6 +467,8 @@ class Ref:
             ea = self.ea_ptr(mode, s)
         elif mode == 5:
             ea = words[1]
+        elif mode == 7:
+            ea = self.item(0)
         else:
             ea = (self.psp + 2 * (w & 15)) & 0xffff     # mode 6, k >= 4
         new = self.rd(ea, s)
@@ -494,6 +506,9 @@ class Ref:
             self.wr(words[1], s, v)
         elif mode == 6:
             self.wr((self.psp + 2 * x) & 0xffff, s, v)
+        elif mode == 7:
+            # dd 1 and 3 only: TOS is still the address after the pop
+            self.wr(self.item(0), s, v)
 
 
 # ---- random program generator ----
@@ -679,6 +694,45 @@ class Program:
         ):
             div = 0
         self.emit(i_muldiv(div, r.getrandbits(1), s))
+        return True
+
+    def lea_one(self):
+        r = self.rng
+        dds = self.ld_dds()
+        if not dds:
+            return False
+        dd = r.choice(dds)
+        self.emit(i_lea(dd, r.randrange(-64, 64)), 1 if dd >= 2 else 0)
+        return True
+
+    def block_tos_ptr(self):
+        """
+        A pointer into the data area pushed, and one instruction through
+        [tos] (the pointer stays or goes, as the dd of the instruction
+        says).
+        """
+        r = self.rng
+        if self.depth + 2 > self.max_depth:
+            return False
+        s = r.getrandbits(1)
+        self.push_imm16(self.addr_far())
+        d = self.depth      # with the pointer
+        kind = r.choice(['ld', 'alu', 'st', 'swap'])
+        if kind == 'ld':
+            dds = [0, 2, 3] + ([1] if d >= 2 else [])
+            dd = r.choice(dds)
+            self.emit(i_gen(OP_LD, dd, s, 7, 0), 1 if dd >= 2 else 0)
+        elif kind == 'alu':
+            dds = [0] + ([1, 2, 3] if d >= 2 else [])
+            dd = r.choice(dds)
+            op = r.randrange(OP_ADD, OP_BIC + 1)
+            self.emit(i_gen(op, dd, s, 7, 0), -1 if dd >= 2 else 0)
+        elif kind == 'st' and d >= 2:
+            dd = r.choice([1, 3])
+            self.emit(i_gen(OP_ST, dd, s, 7, 0), -1 if dd == 3 else 0)
+        else:
+            dd = r.choice([0, 1] if d >= 2 else [0])
+            self.emit(i_gen(OP_SWAP, dd, s, 7, 0))
         return True
 
     def swap_one(self):
@@ -907,7 +961,7 @@ class Program:
 
     def random_op(self, allow_calls):
         r = self.rng
-        x = r.random()
+        x = r.random() * 1.07
         match x:
             case x if x < 0.04:
                 self.block_set_sp()
@@ -944,6 +998,12 @@ class Program:
                     self.ld_one()
             case x if x < 0.90:
                 self.emit(i_misc(MISC_NOP))
+            case x if x < 0.93:
+                if not self.lea_one():
+                    self.ld_one()
+            case x if x < 0.97:
+                if not self.block_tos_ptr():
+                    self.ld_one()
             case _:
                 while not self.st_one():
                     self.ld_one()

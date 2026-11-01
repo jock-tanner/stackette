@@ -15,6 +15,7 @@ flowchart TD
     LD_RD["LD_RD"]
     LD_RD_WAIT["LD_RD_WAIT"]
     LD_DELIVER["LD_DELIVER<br/>cache command"]
+    PTR_TAKE["PTR_TAKE<br/>[tos]: take the address"]
     SWAP_TAKE["SWAP_TAKE<br/>take TOS or NOS"]
     SWAP_WR["SWAP_WR<br/>write it back, memory locked"]
     ALU_DELIVER["ALU_DELIVER<br/>ALU, unary: result and flags"]
@@ -73,6 +74,8 @@ flowchart TD
 
   EXEC -->|"LD, ALU, memory source"| LD_COH
   EXEC -->|"LD, other source"| LD_DELIVER
+  EXEC -->|"[tos]"| PTR_TAKE
+  EXEC -->|"LEA"| LD_DELIVER
   EXEC -->|"SWAP"| SWAP_TAKE
   EXEC -->|"ALU, unary"| ALU_DELIVER
   EXEC -->|"MUL, DIV"| MD_TAKE
@@ -90,6 +93,9 @@ flowchart TD
   LD_RD_WAIT -->|"LD"| LD_DELIVER
   LD_RD_WAIT -->|"ALU"| ALU_DELIVER
   LD_RD_WAIT -->|"SWAP"| SWAP_WR
+  PTR_TAKE -->|"LD, ALU"| LD_COH
+  PTR_TAKE -->|"SWAP"| SWAP_TAKE
+  PTR_TAKE -->|"ST"| ST_POP
   SWAP_TAKE --> LD_COH
   SWAP_WR -->|"req.ready"| LD_DELIVER
   LD_DELIVER --> NEXT
@@ -140,7 +146,7 @@ flowchart TD
   classDef flow fill:#fefce8,stroke:#ca8a04,color:#111827
   classDef exc fill:#fef2f2,stroke:#dc2626,color:#111827
   class FETCH,FETCH_WAIT,DECODE,EXTRA,EXTRA_WAIT,EXEC fe
-  class LD_COH,LD_IDLE,LD_RD,LD_RD_WAIT,LD_DELIVER,ALU_DELIVER,SWAP_TAKE,SWAP_WR,ST_POP,ST_DEST,ST_STK,ST_SP,ST_COH,ST_IDLE,ST_WR mem
+  class LD_COH,LD_IDLE,LD_RD,LD_RD_WAIT,LD_DELIVER,ALU_DELIVER,PTR_TAKE,SWAP_TAKE,SWAP_WR,ST_POP,ST_DEST,ST_STK,ST_SP,ST_COH,ST_IDLE,ST_WR mem
     class MD_TAKE,MD_START,MD_WAIT,MD_DELIVER mem
   class CALL_POP,CALL_RA,CALL_LINK,RET_FLUSH,RET_IDLE,RET_CNT_RD,RET_CNT_WAIT,RET_LNK_RD,RET_LNK_WAIT,RET_IP_RD,RET_IP_WAIT,RET_SP,ADDP_SP flow
   class UNDO,ABORT,SW_FLUSH,SW_WAIT,SW_PSP,RESET_SOFT,RESET_PSP exc

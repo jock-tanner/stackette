@@ -78,28 +78,29 @@ Dyadic instructions takes 3/4 of instruction encoding space (00, 01, and 02).
 Depending on the destination (`dd`) format, they can be destructive or non-destructive,
 i.e. operate directly on stack elements or push the result. 
 
-| Format | Layout                  | Source                                                                                                                                                                                                                                |
-|--------|-------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 00     | `00 oooo dd iiiiiiii`   | 8-bit immediate (sign-extended; zero-extended for logic ops)                                                                                                                                                                          |
-| 01     | `01 oooo dd s fffffff`  | stack frame operand `[sfp + 2*simm7]`                                                                                                                                                                                                 |
-| 10     | `10 oooo dd s mmm xxxx` | `mmm`:<br/>0 register (in `x`),<br/>1 indexed `[mbp+midx]`,<br/>2 indexed post-increment`[mbp+midx++]`,<br/>3 indexed pre-decrement `[mbp+--midx]`,<br/>4 immediate `#imm16`,<br/>5 absolute `[abs16]`,<br/>6 PSP-relative `[sp+2*x]` |
-| 11     |                         | monadic, control, and various instruction (see below)                                                                                                                                                                                 |
+| Format | Layout                  | Source                                                                                                                                                                                                                                                            |
+|--------|-------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 00     | `00 oooo dd iiiiiiii`   | 8-bit immediate (sign-extended; zero-extended for logic ops)                                                                                                                                                                                                      |
+| 01     | `01 oooo dd s fffffff`  | stack frame operand `[sfp + 2*simm7]`                                                                                                                                                                                                                             |
+| 10     | `10 oooo dd s mmm xxxx` | `mmm`:<br/>0 register (in `x`),<br/>1 indexed `[mbp+midx]`,<br/>2 indexed post-increment`[mbp+midx++]`,<br/>3 indexed pre-decrement `[mbp+--midx]`,<br/>4 immediate `#imm16`,<br/>5 absolute `[abs16]`,<br/>6 PSP-relative `[sp+2*x]`,<br/>7 TOS-relative `[tos]` |
+| 11     |                         | monadic, control, and various instruction (see below)                                                                                                                                                                                                             |
 
 Dyadic operation codes (`oooo`) are defined as follows:
 
-| Code | Mnemonic | Meaning                                   |
-|------|----------|-------------------------------------------|
-| 0    | ADD      | Arithmetical addition                     |
-| 1    | ADC      | Addition with Carry bit                   |
-| 2    | SUB      | Subtraction                               |
-| 3    | SBC      | Subtraction with ~Carry (Borrow)          |
-| 4    | AND      | Logical AND                               |
-| 5    | OR       | Logical OR                                |
-| 6    | XOR      | Logical XOR                               |
-| 7    | BIC      | Bit Clear (X And Not Y)                   |
-| 8    | LD       | Load or push                              |
-| 9    | ST       | Store or pop (target and source reversed) | 
-| 10   | SWAP     | Atomically exchange target with source    |
+| Code | Mnemonic | Meaning                                                                               |
+|------|----------|---------------------------------------------------------------------------------------|
+| 0    | ADD      | Arithmetical addition                                                                 |
+| 1    | ADC      | Addition with Carry bit                                                               |
+| 2    | SUB      | Subtraction                                                                           |
+| 3    | SBC      | Subtraction with ~Carry (Borrow)                                                      |
+| 4    | AND      | Logical AND                                                                           |
+| 5    | OR       | Logical OR                                                                            |
+| 6    | XOR      | Logical XOR                                                                           |
+| 7    | BIC      | Bit Clear (X And Not Y)                                                               |
+| 8    | LD       | Load or push                                                                          |
+| 9    | ST       | Store or pop (target and source reversed)                                             | 
+| 10   | SWAP     | Atomically exchange target with source                                                |
+| 11   | LEA      | Calculates the absolute address of stack frame operand. Format 01 and word-size only. |
 
 Bit `s` set signifies the byte form of the instruction. Mnemonic suffix `.b`
 zero-extends the byte operand, and `.bs` sign-extends it. Only LD in

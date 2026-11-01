@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Tiny assembler for the LD and ST instructions of the stack CPU (cpu.py).
 
@@ -12,7 +13,17 @@ Syntax, one instruction per line; `;` starts a comment, `name:` defines a label:
     st DST, DD          DD: tos, nos, pop, under
     add adc sub sbc and or xor bic  DD, SRC
                         DD: tos, nos, push, under; takes SRC like ld
-    ld.b / st.b         8-bit access (ld.bs: byte load, sign-extended)
+    ld.b / st.b         8-bit access (ld.bs: byte load, sign-extended, only
+                        from [mbp+midx], [mbp+midx++] and [mbp+--midx])
+    lea DD, [pfp+n]     DD: tos, nos, push, under; the address SFP+n (n even, -128..126)
+                        goes on the stack like a loaded value. The flags are not
+                        changed.
+    ld, st, the ALU ops and swap also take [tos] as the memory operand: the
+                        address is TOS, taken before anything else happens, so
+                        `ld tos, [tos]` replaces a pointer with what it points
+                        to, `ld push, [tos]` keeps it, `add nos, [tos]` uses it
+                        up (dd as usual). st [tos] takes its value from NOS: `st
+                        [tos], nos` or `st [tos], under`; the pointer stays.
     swap DD, MEM        DD: tos, nos; MEM: [pfp+n], [mbp+midx] (with + or -
                         for the post-increment and pre-decrement forms),
                         [abs], [sp+k] with k >= 4. TOS or NOS and the memory
@@ -100,6 +111,7 @@ REGS = {'tos': 0, 'nos': 1, 'mbp': 2, 'midx': 3, 'sp': 4, 'null': 5, 'sr': 6, 'i
 LD_DD = {'tos': 0, 'nos': 1, 'push': 2, 'under': 3}
 ST_DD = {'tos': 0, 'nos': 1, 'pop': 2, 'under': 3}
 ALU_OPS = ['add', 'adc', 'sub', 'sbc', 'and', 'or', 'xor', 'bic']
+OP_LEA = 11
 OP = {'ld': 8, 'st': 9, 'swap': 10}
 OP.update({name: i for i, name in enumerate(ALU_OPS)})
 
@@ -174,6 +186,8 @@ def parse_operand(text):
             return ('ptr', 2)
         if low == 'mbp+--midx':
             return ('ptr', 3)
+        if low == 'tos':
+            return ('tos', None)
         if low.startswith('sp+'):
             return ('sp', inner[3:])
         if low.startswith('pfp'):
@@ -308,6 +322,20 @@ def encode(mnemonic, operands, labels, pc=0):
             raise AsmError(f'{name} is a word operation')
         dd = dds[operands[0].lower()]
         return [0xe000 | dd << 8 | (suffix == 'b') << 7 | UNARY[name] << 3]
+    if name == 'lea':
+        if suffix:
+            raise AsmError('lea has no size suffix')
+        if len(operands) != 2:
+            raise AsmError('lea takes two operands')
+        dd_name, (kind, arg) = operands[0].lower(), parse_operand(operands[1])
+        if dd_name not in LD_DD:
+            raise AsmError(f'{dd_name!r} is not a stack operand of lea ({", ".join(LD_DD)})')
+        if kind != 'pfp':
+            raise AsmError('lea takes a [pfp+n] operand')
+        n = 0 if labels is None and not is_number(arg) else value(arg, labels or {})
+        if n % 2 or not -128 <= n <= 126:
+            raise AsmError('[pfp+n]: n must be an even byte offset -128..126')
+        return w_pfp(OP_LEA, LD_DD[dd_name], 0, n // 2)
     if name not in OP:
         raise AsmError(f'unknown instruction {mnemonic!r}')
     if suffix not in ('', 'b', 'bs'):
@@ -338,6 +366,11 @@ def encode(mnemonic, operands, labels, pc=0):
         raise AsmError(f'{dd_name!r} is not a stack operand of {name} ({", ".join(dds)})')
     dd = dds[dd_name]
     kind, arg = operand
+    if suffix == 'bs' and (name != 'ld' or kind != 'ptr'):
+        raise AsmError(
+            'the .bs form exists only for ld with [mbp+midx], '
+            '[mbp+midx++] and [mbp+--midx]'
+        )
     if name == 'swap':
         if dd > 1:
             raise AsmError('swap takes tos or nos')
@@ -356,6 +389,10 @@ def encode(mnemonic, operands, labels, pc=0):
         return w_gen(op, dd, s, 0, arg)
     if kind == 'ptr':
         return w_gen(op, dd, s, arg, sx if name == 'ld' else 0)
+    if kind == 'tos':
+        if name == 'st' and dd not in (1, 3):
+            raise AsmError('st [tos] takes its value from nos or under')
+        return w_gen(op, dd, s, 7, 0)
     if kind == 'abs':
         return w_gen(op, dd, s, 5, 0, val(arg))
     if kind == 'sp':
