@@ -24,6 +24,7 @@ Run with `python test_cpu_ldst.py` (or pytest). Needs cpu_model.py.
 import random
 
 from amaranth.sim import Simulator
+import pytest
 
 from cpu import CPU
 from cpu_model import Program, compare_ranges, junk
@@ -149,16 +150,18 @@ def run_case(seed, n_instr=150, p_fault=0.0, user=False):
     sim.run()
 
 
-def test_cpu_ldst():
-    for seed in range(6):
-        run_case(seed)
-    for seed in range(6, 12):  # the same in the user context
-        run_case(seed, user=True)
+@pytest.mark.parametrize('seed, user, p_fault', [(x, False, 0.0) for x in range(6)])
+def test_cpu_system(seed, user, p_fault):
+    run_case(seed, user=user, p_fault=p_fault)
+
+
+@pytest.mark.parametrize('seed, user, p_fault', [(x, True, 0.0) for x in range(6, 12)])
+def test_cpu_user(seed, user, p_fault):
+    # the same tests in user context
+    run_case(seed, user=user, p_fault=p_fault)
+
+
+@pytest.mark.parametrize('seed, user, p_fault', [(x, True, 0.2) for x in range(12, 18)])
+def test_cpu_restart(seed, user, p_fault):
     # restartable instructions: random memory faults in the user context
-    for seed in range(12, 18):
-        run_case(seed, user=True, p_fault=0.2)
-    print('ok')
-
-
-if __name__ == '__main__':
-    test_cpu_ldst()
+    run_case(seed, user=user, p_fault=p_fault)

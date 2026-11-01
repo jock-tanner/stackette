@@ -1,8 +1,10 @@
 """
 Simple test for alu.py: every op, 8- and 16-bit, against a plain-Python model.
 
-Run with `python test_alu.py` (or pytest). The ALU is combinational, so each
-vector is: set the inputs, let the simulation settle, compare all outputs.
+Run with pytest. The ALU is combinational, so each vector is: set the inputs,
+let the simulation settle, compare all outputs. One test is one operation in
+one size, with all its vectors in a single simulation: a simulator per vector
+would cost far more than the vector itself.
 
 Checked, per op (see ref() for the exact definitions):
   * result      (8-bit results are zero-extended; the ALU must ignore the
@@ -16,8 +18,8 @@ Checked, per op (see ref() for the exact definitions):
 RRC (rotate right through carry) also checks carry: it is the bit that fell out.
 
 Not checked: carry and overflow for the logical ops (AND, OR, XOR, BIC, NOT,
-SXT, BSWAP), and overflow for RRC. The ISA leaves C and V unchanged for those, which is decided
-outside the ALU, so any value is fine.
+SXT, BSWAP), and overflow for RRC. The ISA leaves C and V unchanged for those,
+which is decided outside the ALU, so any value is fine.
 
 SXT and BSWAP are word operations: they are only tested with size = word, and
 their flags are those of the 16-bit result. (In byte mode the ALU's SXT is the
@@ -25,8 +27,8 @@ identity and BSWAP is meaningless, so decode should issue them as word ops.)
 """
 import itertools
 import random
-from collections import defaultdict
 
+import pytest
 from amaranth.sim import Simulator
 
 from alu import ALU, OpCodes
@@ -105,45 +107,56 @@ def ref(op, a, b, cin, bits):
     }
 
 
-def vectors(rng, n_random=3000):
-    """Yield (bits, op, a, b, carry_in): corner cases first, then random."""
-    for bits in (16, 8):
-        mask = (1 << bits) - 1
-        msb = 1 << (bits - 1)
-        corners = sorted({
-            0, 1, 2, msb - 1, msb, msb + 1, mask - 1, mask,
-            0x5555 & mask, 0xAAAA & mask,
-        })
+def vectors(bits, op, n_random=300):
+    """
+    Generate data for testing one operation. Format: (a, b, carry_in).
+    Corner cases first, then random. The generator is seeded by the
+    operation, so the data do not depend on which tests run.
+    """
+    rng = random.Random(f'{bits}-{op.name}')
+    mask = (1 << bits) - 1
+    msb = 1 << (bits - 1)
+    corners = sorted({
+        0, 1, 2, msb - 1, msb, msb + 1, mask - 1, mask,
+        0x5555 & mask, 0xAAAA & mask,
+    })
 
-        def widen(v):
-            # 8-bit mode must ignore bits 15:8, so put garbage there
-            return v if bits == 16 else (rng.getrandbits(8) << 8) | v
+    def widen(v):
+        # 8-bit mode must ignore bits 15:8, so put garbage there
+        return v if bits == 16 else (rng.getrandbits(8) << 8) | v
 
-        for op in OpCodes:
-            if bits == 8 and op in WORD_ONLY:
-                continue
-            for a, b, cin in itertools.product(corners, corners, (0, 1)):
-                yield bits, op, widen(a), widen(b), cin
-            for _ in range(n_random // len(OpCodes)):
-                yield (bits, op, rng.getrandbits(16), rng.getrandbits(16),
-                       rng.getrandbits(1))
+    result = [
+        (widen(a), widen(b), cin)
+        for a, b, cin in itertools.product(corners, corners, (0, 1))
+    ]
+    for _ in range(n_random):
+        result.append((
+            rng.getrandbits(16), rng.getrandbits(16), rng.getrandbits(1)
+        ))
+    return result
 
 
-def test_alu():
-    rng = random.Random(1234)
-    alu = ALU()
-    sim = Simulator(alu)
-    failures = defaultdict(list)    # (op name, bits, field) -> messages
-    count = 0
+CASES = [
+    (bits, op)
+    for bits in (16, 8)
+    for op in OpCodes
+    if not (bits == 8 and op in WORD_ONLY)
+]
+
+
+@pytest.mark.parametrize(
+    'bits, op', CASES, ids=[f'{op.name}-{bits}' for bits, op in CASES]
+)
+def test_alu(bits, op):
+    data = vectors(bits, op)
 
     async def bench(ctx):
-        nonlocal count
-        for bits, op, a, b, cin in vectors(rng):
+        ctx.set(alu.op_code, op.value)
+        ctx.set(alu.size, SIZE_BYTE if bits == 8 else 1 - SIZE_BYTE)
+        for a, b, cin in data:
             ctx.set(alu.operand_a, a)
             ctx.set(alu.operand_b, b)
             ctx.set(alu.carry_in, cin)
-            ctx.set(alu.op_code, op.value)
-            ctx.set(alu.size, SIZE_BYTE if bits == 8 else 1 - SIZE_BYTE)
             await ctx.delay(1e-9)
 
             expected = ref(op, a, b, cin, bits)
@@ -151,29 +164,12 @@ def test_alu():
                 if expected[field] is None:
                     continue
                 got = ctx.get(getattr(alu, field))
-                if got != expected[field]:
-                    failures[(op.name, bits, field)].append(
-                        f'a={a:#06x} b={b:#06x} cin={cin}: '
-                        f'expected {expected[field]:#x}, got {got:#x}'
-                    )
-            count += 1
+                assert got == expected[field], (
+                    f'{op.name}/{bits}: a={a:#06x} b={b:#06x} cin={cin}: '
+                    f'{field} expected {expected[field]:#x}, got {got:#x}'
+                )
 
+    alu = ALU()
+    sim = Simulator(alu)
     sim.add_testbench(bench)
     sim.run()
-
-    if failures:
-        print(
-            f'FAILED: {sum(map(len, failures.values()))} mismatches '
-            f'in {count} vectors'
-        )
-        for (name, bits, field), msgs in sorted(failures.items()):
-            print(
-                f'  {name:3} {bits:2}-bit {field:8} x{len(msgs):<5} '
-                f'first: {msgs[0]}'
-            )
-        raise AssertionError('ALU does not match the model!')
-    print(f'ok: {count} vectors')
-
-
-if __name__ == '__main__':
-    test_alu()

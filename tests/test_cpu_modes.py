@@ -18,11 +18,13 @@ import os
 import random
 
 from amaranth.sim import Simulator
+import pytest
 
 from asm.asm import assemble
 from system import System
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RECEIVED = [(4000, 97), (4000, 98), (6000, 99), (9000, 63), (9001, 120)]
 
 
 def serve(port, store, rng, p_ready, uart=None, rx=None, irq=None):
@@ -78,7 +80,7 @@ def assembled(name):
 
 
 def run_program(
-    name, seed, n_cycles, p_ready, received=(), mmu_sync=False
+    name, seed, n_cycles, p_ready, expected, received=(), mmu_sync=False
 ):
     # `received`: (cycle, byte) pairs that arrive at the UART
     rng = random.Random(seed)
@@ -98,6 +100,7 @@ def run_program(
     seen = {'aborts': 0, 'swaps': 0}
 
     async def bench(ctx):
+        left = None
         for cycle in range(n_cycles):
             await ctx.tick()
             seen['aborts'] += ctx.get(dut.cpu.aborted)
@@ -105,6 +108,10 @@ def run_program(
                 if at == cycle:
                     rx.append(byte)
                     ctx.set(dut.irq_ext, 1)
+            if expected is not None and len(uart) >= len(expected):
+                left = 200 if left is None else left - 1
+                if not left:
+                    break
 
     # SWAP is atomic: a request of the RAM that is accepted while the CPU
     # holds the memory is a read, and the next one is the write to the same
@@ -134,64 +141,85 @@ def run_program(
     return bytes(uart), seen
 
 
-def test_cpu_modes():
+@pytest.mark.parametrize('name, expected, cycles, received', [
+    ('hw7_modes.asm', b'ABCBCDEFGHSITJ', 12000, ()),
+    ('hw8_mmu.asm', b'ABCDEFG', 16000, ()),
+    ('hw10_swap.asm', b'ABCDEFG', 8000, ()),
+    ('hw12_muldiv.asm', b'ABCDEFG', 12000, ()),
+    ('hw13_lea_ptr.asm', b'ABCDEFGHI', 16000, ()),
+    ('hw11_uart_irq.asm', b'>abcYx', 28000, RECEIVED),
+    ('hw9_irq.asm', b'ABCDE', 120000, ()),
+])
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.5)])
+def test_sync_mmu(name, expected, cycles, received, seed, p_ready):
+    # the MMU with synchronous read ports: one more clock for a request
+    out, seen = run_program(
+        name, seed, cycles, p_ready, expected, received, mmu_sync=True
+    )
+    assert out == expected, (
+        f'{name}, synchronous MMU, seed {seed}: the output is {out!r}'
+    )
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_cpu_modes(seed, p_ready):
     expected = b'ABCBCDEFGHSITJ'
-    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
-        out, seen = run_program('hw7_modes.asm', seed, 6000, p_ready)
-        assert out == expected, (
-            f'seed {seed}: the output is {out!r}, expected {expected!r}'
-        )
-        # the illegal 0xffff and RETI of the user,
-        # the illegal 0xffff of the system
-        assert seen['aborts'] == 3, seen
+    out, seen = run_program('hw7_modes.asm', seed, 6000, p_ready, expected)
+    assert out == expected, (
+        f'seed {seed}: the output is {out!r}, expected {expected!r}'
+    )
+    # the illegal 0xffff and RETI of the user,
+    # the illegal 0xffff of the system
+    assert seen['aborts'] == 3, seen
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_mmu(seed, p_ready):
+    expected = b'ABCDEFG'
     # the MMU: pages mapped for the user, a page with no memory, the soft reset
-    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
-        out, seen = run_program('hw8_mmu.asm', seed, 8000, p_ready)
-        assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
+    out, seen = run_program('hw8_mmu.asm', seed, 8000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_swap(seed, p_ready):
+    expected = b'ABCDEFG'
     # SWAP: words, bytes, the stack as memory, a lock; atomic on the RAM
-    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
-        out, seen = run_program('hw10_swap.asm', seed, 4000, p_ready)
-        assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
-        assert seen['swaps'] == 7, seen
+    out, seen = run_program('hw10_swap.asm', seed, 4000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+    assert seen['swaps'] == 7, seen
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_muldiv(seed, p_ready):
+    expected = b'ABCDEFG'
     # MUL and DIV: results, flags, bytes, the overflow, a division by zero
-    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
-        out, seen = run_program('hw12_muldiv.asm', seed, 6000, p_ready)
-        assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
+    out, seen = run_program('hw12_muldiv.asm', seed, 6000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_lea(seed, p_ready):
+    expected = b'ABCDEFGHI'
     # LEA and [tos]: addresses of frame items, pointers on the stack
-    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
-        out, seen = run_program('hw13_lea_ptr.asm', seed, 8000, p_ready)
-        assert out == b'ABCDEFGHI', f'seed {seed}: the output is {out!r}'
+    out, seen = run_program('hw13_lea_ptr.asm', seed, 8000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_uart_irq(seed, p_ready):
+    expected = b'>abcYx'
     # the UART receiver interrupts: the bytes are echoed by the handler, a
     # '?' is answered; two bytes come at the same time
-    received = [(4000, 97), (4000, 98), (6000, 99), (9000, 63), (9001, 120)]
-    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
-        out, seen = run_program(
-            'hw11_uart_irq.asm', seed, 14000, p_ready, received
-        )
-        assert out == b'>abcYx', f'seed {seed}: the output is {out!r}'
+    out, seen = run_program(
+        'hw11_uart_irq.asm', seed, 14000, p_ready, expected, RECEIVED
+    )
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_irqs(seed, p_ready):
+    expected = b'ABCDE'
     # the interrupts: the timer, the mask, between SKIP and what it skips
-    for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
-        out, seen = run_program('hw9_irq.asm', seed, 60000, p_ready)
-        assert out == b'ABCDE', f'seed {seed}: the output is {out!r}'
-    # the MMU with synchronous read ports: one more clock for a request
-    for name, expected, cycles, received in (
-        ('hw7_modes.asm', b'ABCBCDEFGHSITJ', 12000, ()),
-        ('hw8_mmu.asm', b'ABCDEFG', 16000, ()),
-        ('hw10_swap.asm', b'ABCDEFG', 8000, ()),
-        ('hw12_muldiv.asm', b'ABCDEFG', 12000, ()),
-        ('hw13_lea_ptr.asm', b'ABCDEFGHI', 16000, ()),
-        ('hw11_uart_irq.asm', b'>abcYx', 28000, received),
-        ('hw9_irq.asm', b'ABCDE', 120000, ()),
-    ):
-        for seed, p_ready in ((1, 1.0), (2, 0.5)):
-            out, seen = run_program(
-                name, seed, cycles, p_ready, received, mmu_sync=True
-            )
-            assert out == expected, (
-                f'{name}, synchronous MMU, seed {seed}: the output is {out!r}'
-            )
-    print('ok')
-
-
-if __name__ == '__main__':
-    test_cpu_modes()
+    out, seen = run_program('hw9_irq.asm', seed, 60000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'

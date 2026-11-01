@@ -657,7 +657,7 @@ class CPU(Component):
                 m.d.comb += self.space.eq(Space.DATA)
 
         # finally, the CPU control FSM
-        with m.FSM(reset='INIT') as fsm:
+        with m.FSM(init='INIT') as fsm:
             with m.State('INIT'):
                 # the cache does not know PSP at power-up: set it once
                 m.d.comb += [
