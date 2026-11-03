@@ -13,6 +13,11 @@ Syntax, one instruction per line; `;` starts a comment, `name:` defines a label:
     st DST, DD          DD: tos, nos, pop, under
     add adc sub sbc and or xor bic  DD, SRC
                         DD: tos, nos, push, under; takes SRC like ld
+    cmp tst  DD, SRC    like sub and and, but the result is not written: only the
+                        flags change (cmp: C Z N V P as sub, tst: Z N P as and). DD
+                        names the item compared, as in st: tos, nos (the stack
+                        stays), pop (TOS, which is removed), under (NOS, which is
+                        removed). tst takes an imm8 zero-extended, cmp sign-extended.
     ld.b / st.b         8-bit access (ld.bs: byte load, sign-extended, only from
                         memory through a pointer: [mbp+midx], [mbp+midx++],
                         [mbp+--midx], [tos], and from [abs] and [sp+k], k >= 4)
@@ -116,7 +121,9 @@ LD_DD = {'tos': 0, 'nos': 1, 'push': 2, 'under': 3}
 ST_DD = {'tos': 0, 'nos': 1, 'pop': 2, 'under': 3}
 ALU_OPS = ['add', 'adc', 'sub', 'sbc', 'and', 'or', 'xor', 'bic']
 OP_LEA = 11
-OP = {'ld': 8, 'st': 9, 'swap': 10}
+CMP_OPS = ['cmp', 'tst']
+LOGIC_OPS = ALU_OPS[4:] + ['tst']
+OP = {'ld': 8, 'st': 9, 'swap': 10, 'cmp': 12, 'tst': 13}
 OP.update({name: i for i, name in enumerate(ALU_OPS)})
 
 
@@ -359,7 +366,7 @@ def encode(mnemonic, operands, labels, pc=0):
     sx = 1 if suffix == 'bs' else 0
     if len(operands) != 2:
         raise AsmError(f'{name} takes two operands')
-    if name in ALU_OPS and suffix == 'bs':
+    if (name in ALU_OPS or name in CMP_OPS) and suffix == 'bs':
         raise AsmError('ALU instructions have no .bs form, use .b')
     if name == 'swap' and suffix == 'bs':
         raise AsmError('swap has no .bs form, use .b')
@@ -372,7 +379,7 @@ def encode(mnemonic, operands, labels, pc=0):
 
     if name != 'st':
         dd_name, operand = operands[0].lower(), parse_operand(operands[1])
-        dds = LD_DD
+        dds = ST_DD if name in CMP_OPS else LD_DD
     else:
         dd_name, operand = operands[1].lower(), parse_operand(operands[0])
         dds = ST_DD
@@ -398,8 +405,8 @@ def encode(mnemonic, operands, labels, pc=0):
         if name == 'st':
             raise AsmError('st has no immediate form')
         v = val(arg)
-        lo = 0 if name in ALU_OPS[4:] else -128
-        hi = 255 if name in ALU_OPS[4:] else 127
+        lo = 0 if name in LOGIC_OPS else -128
+        hi = 255 if name in LOGIC_OPS else 127
         if is_number(arg) and not s and lo <= v <= hi:
             return w_imm8(op, dd, v)
         return w_gen(op, dd, s, F_IMM16, v)

@@ -25,6 +25,8 @@ OP_LD = 8
 OP_ST = 9
 OP_SWAP = 10
 OP_LEA = 11
+OP_CMP = 12
+OP_TST = 13
 U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC = range(6)
 REG_TOS = 0
 REG_NOS = 1
@@ -228,9 +230,9 @@ class Ref:
         elif op == OP_LD:
             v = self.ld_src(words, fmt, s, next_ip)
             self.ld_put(dd, v)
-        elif OP_ADD <= op <= OP_BIC:
+        elif OP_ADD <= op <= OP_BIC or op in (OP_CMP, OP_TST):
             b = self.ld_src(words, fmt, s, next_ip)
-            if fmt == 0 and op >= OP_AND:
+            if fmt == 0 and (OP_AND <= op <= OP_BIC or op == OP_TST):
                 b = w & 0xff
             self.alu(op, dd, b, s)
         elif op == OP_SWAP and fmt != 0:
@@ -409,9 +411,18 @@ class Ref:
         self.ld_put(dd, r)
 
     def alu(self, op, dd, b, s):
+        """
+        CMP and TST are SUB and AND without the write; like ST, dd 0 and 2
+        use TOS, dd 1 and 3 use NOS, and dd 2 and 3 remove that item.
+        """
         bits = 8 if s else 16
         mask = (1 << bits) - 1
-        pos = 1 if dd in (1, 2) else 0
+        cmp = op in (OP_CMP, OP_TST)
+        pos = dd & 1 if cmp else 1 if dd in (1, 2) else 0
+        if op == OP_CMP:
+            op = OP_SUB
+        elif op == OP_TST:
+            op = OP_AND
         a = self.item(pos) & mask
         b &= mask
         sa, sb = sext(a, bits), sext(b, bits)
@@ -441,6 +452,14 @@ class Ref:
         self.z = int(r == 0)
         self.n = r >> (bits - 1) & 1
         self.p = int(bin(r).count('1') % 2 == 0)
+        if cmp:
+            if dd == 2:
+                self.psp += 2
+            elif dd == 3:
+                top = self.item(0)
+                self.psp += 2
+                self.wr16(self.psp, top)
+            return
         if dd == 0:
             self.wr16(self.psp, r)
         elif dd == 1:
@@ -698,7 +717,7 @@ class Program:
         if not dds:
             return False
         dd = r.choice(dds)
-        op = r.randrange(OP_ADD, OP_BIC + 1)
+        op = r.choice(list(range(OP_ADD, OP_BIC + 1)) + [OP_CMP, OP_TST] * 2)
         ins = self.src_ins(op, dd, r.getrandbits(1), d)
         if ins is None:
             return False

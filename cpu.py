@@ -26,6 +26,8 @@ OP_LD = 0b1000
 OP_ST = 0b1001
 OP_SWAP = 0b1010
 OP_LEA = 0b1011
+OP_CMP = 0b1100
+OP_TST = 0b1101
 FMT_IMM8 = 0
 FMT_PFP = 1
 FMT_GEN = 2
@@ -223,14 +225,16 @@ class CPU(Component):
         is_gen = fmt == FMT_GEN
         is_ld = (op == OP_LD) & (fmt != 3)
         is_st = (op == OP_ST) & (fmt != 3) & (fmt != FMT_IMM8)
-        is_alu = (op < OP_LD) & (fmt != 3)
+        # CMP and TST are SUB and AND that do not write the result
+        is_cmp = ((op == OP_CMP) | (op == OP_TST)) & (fmt != 3)
+        is_alu = ((op < OP_LD) | is_cmp) & (fmt != 3)
         is_swap = (op == OP_SWAP) & ((fmt == FMT_PFP) | (fmt == FMT_GEN))
         # LEA: the address of a frame item, PFP + 2*simm7 as in a PFP
         # operand, goes on the stack like a loaded value (`s` must be 0)
         is_lea = (op == OP_LEA) & (fmt == FMT_PFP)
 
         # AND OR XOR BIC; only looked at for ALU ops, so one bit is enough
-        is_logic = op[2]
+        is_logic = Mux(is_cmp, op[0], op[2])
 
         # control format 11: BRA, CALL rel11, ADDP, and the misc group
         is_ctl = fmt == 3
@@ -537,10 +541,12 @@ class CPU(Component):
         md_b = Signal(16)       # MUL, DIV: TOS
 
         # the destination item: TOS for dd 0 and 3, NOS for dd 1 and 2. The
-        # unary operations use the same item as their operand.
+        # unary operations use the same item as their operand. CMP and TST
+        # compare TOS for dd 0 and 2, NOS for dd 1 and 3, like ST, and the
+        # pop of dd 2 and the removal of dd 3 follow.
         alu_pos = Signal(2)
         m.d.comb += [
-            alu_pos.eq(dd[0] ^ dd[1]),
+            alu_pos.eq(Mux(is_cmp, dd[0], dd[0] ^ dd[1])),
             alu.operand_a.eq(lines[alu_pos]),
             alu.size.eq(s),
             alu.carry_in.eq(sw[0]),
@@ -585,6 +591,8 @@ class CPU(Component):
                     m.d.comb += alu.op_code.eq(OpCodes.ADC)
                 with m.Case(UOP_RRC):
                     m.d.comb += alu.op_code.eq(OpCodes.RRC)
+        with m.Elif(is_cmp):
+            m.d.comb += alu.op_code.eq(Mux(op[0], OpCodes.AND, OpCodes.SUB))
         with m.Else():
             m.d.comb += alu.op_code.eq(Cat(op[:2], C(0), op[2]))
 
@@ -966,7 +974,7 @@ class CPU(Component):
                 m.d.comb += [
                     cmd.valid.eq(1),
                     cmd.need.eq(ld_need | need_of(alu_pos)),
-                    cmd.w0_en.eq(1),
+                    cmd.w0_en.eq(~is_cmp),
                     cmd.w0_pos.eq(alu_pos),
                     cmd.w0_data.eq(alu.result),
                 ]

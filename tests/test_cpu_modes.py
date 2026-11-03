@@ -150,6 +150,7 @@ def run_program(
     ('hw11_uart_irq.asm', b'>abcYx', 28000, RECEIVED),
     ('hw9_irq.asm', b'ABCDE', 120000, ()),
     ('hw14_operands.asm', b'ABCDEFGHIJ', 20000, ()),
+    ('hw15_cmp_tst.asm', b'ABCDEFGH', 12000, ()),
 ])
 @pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.5)])
 def test_sync_mmu(name, expected, cycles, received, seed, p_ready):
@@ -225,9 +226,17 @@ def test_irqs(seed, p_ready):
     out, seen = run_program('hw9_irq.asm', seed, 60000, p_ready, expected)
     assert out == expected, f'seed {seed}: the output is {out!r}'
 
+
 @pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
 def test_operands(seed, p_ready):
     expected = b'ABCDEFGHIJ'
     # ld.bs from [abs], [tos], [sp+k]; [sp+31]; e of a swap; illegal codes
     out, seen = run_program('hw14_operands.asm', seed, 20000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+# CMP and TST: the item compared, pop and under, flags, bytes, memory operands
+for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+    expected = b'ABCDEFGH'
+    out, seen = run_program('hw15_cmp_tst.asm', seed, 6000, p_ready, expected)
     assert out == expected, f'seed {seed}: the output is {out!r}'
