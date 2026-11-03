@@ -6,7 +6,7 @@ Word numbers (the same as the CTX_ constants of cpu.py):
 
    0  IP            of the inactive context
    1  RSP
-   2  SFP
+   2  PFP
    3  MBP
    4  MIDX
    5  SW            status register (only the implemented bits are kept)

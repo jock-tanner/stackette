@@ -11,7 +11,7 @@ from stack_cache import Maint, Shift, StackCache
 IP_INIT = 0x0000
 RSP_INIT = 0x0000
 PSP_INIT = 0xf000
-SFP_INIT = 0xf000
+PFP_INIT = 0xf000
 
 # Instruction word fields (see the ISA encoding table).
 OP_ADD = 0b0000
@@ -74,7 +74,7 @@ FAULT_DIV = 4       # division by zero
 # shows them on its `ctx_*` port (word numbers)
 CTX_IP = 0
 CTX_RSP = 1
-CTX_SFP = 2
+CTX_PFP = 2
 CTX_MBP = 3
 CTX_MIDX = 4
 CTX_SW = 5
@@ -107,7 +107,7 @@ class CPU(Component):
 
     # The user flag tells which context is active: 0 system, 1 user. No
     # instruction can read it. The registers of the other context (IP, RSP,
-    # SFP, MBP, MIDX, SW and PSP) and the exception data are reachable by
+    # PFP, MBP, MIDX, SW and PSP) and the exception data are reachable by
     # word number through this port, which the memory-mapped context device
     # drives. Writes go to the inactive context only; the registers after
     # CTX_PSP are read only.
@@ -148,7 +148,7 @@ class CPU(Component):
         # programming model registers
         ip = Signal(16, init=IP_INIT)
         rsp = Signal(16, init=RSP_INIT)
-        sfp = Signal(16, init=SFP_INIT)
+        pfp = Signal(16, init=PFP_INIT)
         mbp = Signal(16)
         midx = Signal(16)
         sw = Signal(16)
@@ -157,7 +157,7 @@ class CPU(Component):
         # it with the registers above; PSP lives in the stack cache.
         b_ip = Signal(16, init=self.user_ip_init)
         b_rsp = Signal(16, init=RSP_INIT)
-        b_sfp = Signal(16, init=SFP_INIT)
+        b_pfp = Signal(16, init=PFP_INIT)
         b_mbp = Signal(16)
         b_midx = Signal(16)
         b_sw = Signal(16)
@@ -178,7 +178,7 @@ class CPU(Component):
         # visible to testbenches
         self.intr_id = intr_id
         self.sw = sw
-        self.sfp = sfp
+        self.pfp = pfp
         self.rsp = rsp
 
         # internal registers
@@ -225,7 +225,7 @@ class CPU(Component):
         is_st = (op == OP_ST) & (fmt != 3) & (fmt != FMT_IMM8)
         is_alu = (op < OP_LD) & (fmt != 3)
         is_swap = (op == OP_SWAP) & ((fmt == FMT_PFP) | (fmt == FMT_GEN))
-        # LEA: the address of a frame item, SFP + 2*simm7 as in a PFP
+        # LEA: the address of a frame item, PFP + 2*simm7 as in a PFP
         # operand, goes on the stack like a loaded value (`s` must be 0)
         is_lea = (op == OP_LEA) & (fmt == FMT_PFP)
 
@@ -343,7 +343,7 @@ class CPU(Component):
 
         ea = Signal(16)
         with m.If(is_pfp):
-            m.d.comb += ea.eq(sfp + off)
+            m.d.comb += ea.eq(pfp + off)
         with m.Elif(abs_mode):
             m.d.comb += ea.eq(extra)
         with m.Elif(ptr_mode):
@@ -596,7 +596,7 @@ class CPU(Component):
         # that can fault comes after it. Before it only things happen that
         # a second execution does the same again (a store of the same value
         # to the same address, FLUSH of the cache), and the registers that
-        # the instruction updates (MIDX, RSP, SFP, flags, PSP) are changed
+        # the instruction updates (MIDX, RSP, PFP, flags, PSP) are changed
         # at the commit. The exceptions are the instructions that pop the
         # stack before their last memory access (ST with a pop, CALL pop):
         # they put the popped value back (UNDO).
@@ -657,7 +657,7 @@ class CPU(Component):
                 m.d.comb += self.space.eq(Space.DATA)
 
         # finally, the CPU control FSM
-        with m.FSM(init='INIT') as fsm:
+        with m.FSM(reset='INIT') as fsm:
             with m.State('INIT'):
                 # the cache does not know PSP at power-up: set it once
                 m.d.comb += [
@@ -793,7 +793,11 @@ class CPU(Component):
                 with m.Elif(is_call_direct):
                     m.next = 'CALL_RA'
                 with m.Elif(is_ret):
-                    m.next = 'RET_FLUSH'
+                    with m.If(is_ret_n):
+                        m.d.sync += val.eq(instr[0:6])
+                        m.next = 'RET_IP_RD'
+                    with m.Else():
+                        m.next = 'RET_FLUSH'
                 with m.Elif(is_reti):
                     # only in system mode (the user mode RETI is not `ok`)
                     m.next = 'SW_FLUSH'
@@ -1071,10 +1075,11 @@ class CPU(Component):
                     m.next = 'FETCH'
 
             # ---- CALL ----
-            # The return address goes on the return stack, the caller's SFP
-            # becomes the first word of the new frame on the parameter stack,
-            # and SFP points at it: [sfp] is the saved SFP, [sfp+2] the
-            # argument count the caller pushed (it counts itself).
+            # The return address and the caller's PFP go on the return stack
+            # (the address on top: at rsp-4, PFP at rsp-2), and PFP becomes PSP: the frame is empty
+            # and the arguments the caller pushed start at [pfp]. Nothing is
+            # written to the parameter stack. RSP moves only after both writes
+            # have been accepted.
             # CALL pop takes its target off the stack first.
             with m.State('CALL_POP'):
                 m.d.comb += [
@@ -1095,7 +1100,7 @@ class CPU(Component):
                     req.we.eq(1),
                     req.byte_hi.eq(1),
                     req.byte_lo.eq(1),
-                    req.addr.eq((rsp - 2)[1:]),
+                    req.addr.eq((rsp - 4)[1:]),
                     req.wdata.eq(ip),
                 ]
                 with m.If(self.mem_fault):
@@ -1105,29 +1110,38 @@ class CPU(Component):
                     with m.Else():
                         mem_refused()
                 with m.Elif(req.ready):
-                    m.d.sync += rsp.eq(rsp - 2)
                     m.next = 'CALL_LINK'
 
             with m.State('CALL_LINK'):
+                rstack_space()
                 m.d.comb += [
-                    cmd.valid.eq(1),
-                    cmd.shift.eq(Shift.PUSH),
-                    cmd.arg.eq(sfp),
+                    req.valid.eq(1),
+                    req.we.eq(1),
+                    req.byte_hi.eq(1),
+                    req.byte_lo.eq(1),
+                    req.addr.eq((rsp - 2)[1:]),
+                    req.wdata.eq(pfp),
                 ]
-                with m.If(cmd.ready):
+                with m.If(self.mem_fault):
+                    with m.If(is_call_pop):
+                        mem_refused(undo=True)
+                    with m.Else():
+                        mem_refused()
+                with m.Elif(req.ready):
                     m.d.sync += [
-                        sfp.eq(stack.psp - 2),
+                        rsp.eq(rsp - 4),
+                        pfp.eq(stack.psp),
                         ip.eq(tgt),
                     ]
                     m.next = 'FETCH'
 
             # ---- RET ----
-            # Reads the saved SFP (and for the variadic RET the count) from the
-            # frame in memory, so the cache is flushed first. It drops the
-            # frame and the arguments by moving PSP to sfp + 2 + 2 * count,
-            # restores SFP and takes the return address off the return stack.
-            # RET #n has no count word in the frame: count = n, from the
-            # instruction.
+            # Takes the return address and the caller's PFP off the return
+            # stack and adds 2 * n to PSP: the callee has already released its
+            # locals and left its result in the top n-th word of the frame
+            # area (see isa.md). RET #n has n in the instruction. The variadic
+            # RET reads n from the word at [pfp], so the cache is flushed
+            # first.
             with m.State('RET_FLUSH'):
                 m.d.comb += [
                     cmd.valid.eq(1),
@@ -1138,11 +1152,7 @@ class CPU(Component):
 
             with m.State('RET_IDLE'):
                 with m.If(stack.idle):
-                    with m.If(is_ret_n):
-                        m.d.sync += val.eq(instr[0:6])
-                        m.next = 'RET_LNK_RD'
-                    with m.Else():
-                        m.next = 'RET_CNT_RD'
+                    m.next = 'RET_CNT_RD'
 
             with m.State('RET_CNT_RD'):
                 pstack_space()
@@ -1151,7 +1161,7 @@ class CPU(Component):
                     req.we.eq(0),
                     req.byte_hi.eq(1),
                     req.byte_lo.eq(1),
-                    req.addr.eq((sfp + 2)[1:]),
+                    req.addr.eq(pfp[1:]),
                 ]
                 with m.If(self.mem_fault):
                     mem_refused()
@@ -1161,28 +1171,8 @@ class CPU(Component):
             with m.State('RET_CNT_WAIT'):
                 with m.If(resp.valid):
                     m.d.sync += val.eq(resp.data)
-                    m.next = 'RET_LNK_RD'
-
-            with m.State('RET_LNK_RD'):
-                pstack_space()
-                m.d.comb += [
-                    req.valid.eq(1),
-                    req.we.eq(0),
-                    req.byte_hi.eq(1),
-                    req.byte_lo.eq(1),
-                    req.addr.eq(sfp[1:]),
-                ]
-                with m.If(self.mem_fault):
-                    mem_refused()
-                with m.Elif(req.ready):
-                    m.next = 'RET_LNK_WAIT'
-
-            with m.State('RET_LNK_WAIT'):
-                with m.If(resp.valid):
-                    m.d.sync += link.eq(resp.data)
                     m.next = 'RET_IP_RD'
 
-            # the last read; nothing is changed until RET_SP
             with m.State('RET_IP_RD'):
                 rstack_space()
                 m.d.comb += [
@@ -1201,20 +1191,40 @@ class CPU(Component):
             with m.State('RET_IP_WAIT'):
                 with m.If(resp.valid):
                     m.d.sync += ip.eq(resp.data)
+                    m.next = 'RET_LNK_RD'
+
+            # the last read; nothing else is changed until RET_SP
+            with m.State('RET_LNK_RD'):
+                rstack_space()
+                m.d.comb += [
+                    req.valid.eq(1),
+                    req.we.eq(0),
+                    req.byte_hi.eq(1),
+                    req.byte_lo.eq(1),
+                    req.addr.eq((rsp + 2)[1:]),
+                ]
+                with m.If(self.mem_fault):
+                    mem_refused()
+                with m.Elif(req.ready):
+                    m.next = 'RET_LNK_WAIT'
+
+            with m.State('RET_LNK_WAIT'):
+                with m.If(resp.valid):
+                    m.d.sync += link.eq(resp.data)
                     m.next = 'RET_SP'
 
-            # the commit, which cannot fault: the cache was flushed, so there
-            # is nothing to write back
+            # the commit. SET_PSP writes the dirty lines back first: a refused
+            # write-back is asynchronous, so the instruction does not fault
             with m.State('RET_SP'):
                 m.d.comb += [
                     cmd.valid.eq(1),
                     cmd.maint.eq(Maint.SET_PSP),
-                    cmd.arg.eq(sfp + 2 + Cat(C(0, 1), val)),
+                    cmd.arg.eq(stack.psp + Cat(C(0, 1), val)),
                 ]
                 with m.If(cmd.ready):
                     m.d.sync += [
-                        sfp.eq(link),
-                        rsp.eq(rsp + 2),
+                        pfp.eq(link),
+                        rsp.eq(rsp + 4),
                     ]
                     m.next = 'FETCH'
 
@@ -1400,7 +1410,7 @@ class CPU(Component):
                     m.d.sync += [
                         ip.eq(b_ip), b_ip.eq(ip),
                         rsp.eq(b_rsp), b_rsp.eq(rsp),
-                        sfp.eq(b_sfp), b_sfp.eq(sfp),
+                        pfp.eq(b_pfp), b_pfp.eq(pfp),
                         mbp.eq(b_mbp), b_mbp.eq(mbp),
                         midx.eq(b_midx), b_midx.eq(midx),
                         sw.eq(b_sw), b_sw.eq(sw),
@@ -1426,7 +1436,7 @@ class CPU(Component):
                     m.d.sync += [
                         ip.eq(IP_INIT),
                         rsp.eq(RSP_INIT),
-                        sfp.eq(SFP_INIT),
+                        pfp.eq(PFP_INIT),
                         mbp.eq(0),
                         midx.eq(0),
                         sw.eq(0),
@@ -1447,7 +1457,7 @@ class CPU(Component):
 
         # ---- the context port ----
         ctx_regs = Array([
-            b_ip, b_rsp, b_sfp, b_mbp, b_midx, b_sw, b_psp,
+            b_ip, b_rsp, b_pfp, b_mbp, b_midx, b_sw, b_psp,
             intr_id, fault_ip, fault_addr,
         ])
         with m.If(self.ctx_addr < 10):
@@ -1458,8 +1468,8 @@ class CPU(Component):
                     m.d.sync += b_ip.eq(self.ctx_wdata)
                 with m.Case(CTX_RSP):
                     m.d.sync += b_rsp.eq(self.ctx_wdata)
-                with m.Case(CTX_SFP):
-                    m.d.sync += b_sfp.eq(self.ctx_wdata)
+                with m.Case(CTX_PFP):
+                    m.d.sync += b_pfp.eq(self.ctx_wdata)
                 with m.Case(CTX_MBP):
                     m.d.sync += b_mbp.eq(self.ctx_wdata)
                 with m.Case(CTX_MIDX):

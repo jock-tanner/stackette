@@ -14,7 +14,7 @@ stack is dumped through LD/ST so it can be compared.
 import random
 
 PSP0 = 0xf000
-SFP0 = 0xf000
+PFP0 = 0xf000
 FAR = 0x2000        # data area for pointer accesses
 OUT = 0x3000        # result dump
 TOP = 0xf008        # memory above the stack base, free to use
@@ -165,7 +165,7 @@ class Ref:
     def __init__(self):
         self.w = {}
         self.psp = PSP0
-        self.sfp = SFP0
+        self.pfp = PFP0
         self.mbp = 0
         self.midx = 0
         self.rsp = 0
@@ -224,7 +224,7 @@ class Ref:
             return self.ctl(words, next_ip)
         s = (w >> 7) & 1 if fmt else 0
         if op == OP_LEA and fmt == 1:
-            self.ld_put(dd, (self.sfp + 2 * sext(w & 0x7f, 7)) & 0xffff)
+            self.ld_put(dd, (self.pfp + 2 * sext(w & 0x7f, 7)) & 0xffff)
         elif op == OP_LD:
             v = self.ld_src(words, fmt, s, next_ip)
             self.ld_put(dd, v)
@@ -269,21 +269,19 @@ class Ref:
         ][cc])
 
     def call(self, target, ret):
-        self.rsp = (self.rsp - 2) & 0xffff
+        self.rsp = (self.rsp - 4) & 0xffff
         self.wr16(self.rsp, ret)
-        self.psp -= 2
-        self.wr16(self.psp, self.sfp)
-        self.sfp = self.psp
+        self.wr16(self.rsp + 2, self.pfp)
+        self.pfp = self.psp
         return target
 
     def ret(self, n):
         if n is None:
-            n = self.rd16(self.sfp + 2)
-        link = self.rd16(self.sfp)
-        self.psp = (self.sfp + 2 + 2 * n) & 0xffff
-        self.sfp = link
+            n = self.rd16(self.pfp)
         ip = self.rd16(self.rsp)
-        self.rsp = (self.rsp + 2) & 0xffff
+        self.pfp = self.rd16(self.rsp + 2)
+        self.rsp = (self.rsp + 4) & 0xffff
+        self.psp = (self.psp + 2 * n) & 0xffff
         return ip
 
     def ctl(self, words, next_ip):
@@ -456,7 +454,7 @@ class Ref:
         if fmt == 0:
             return sext(w & 0xff, 8) & 0xffff
         if fmt == 1:
-            return self.rd((self.sfp + 2 * sext(w & 0x7f, 7)) & 0xffff, s)
+            return self.rd((self.pfp + 2 * sext(w & 0x7f, 7)) & 0xffff, s)
         mode, x, e = gen_operand(w)
         if mode == 0:
             regs = {
@@ -507,7 +505,7 @@ class Ref:
         old = self.item(dd)
         mode, x, _ = (0, 0, 0) if fmt == 1 else gen_operand(w)
         if fmt == 1:
-            ea = (self.sfp + 2 * sext(w & 0x7f, 7)) & 0xffff
+            ea = (self.pfp + 2 * sext(w & 0x7f, 7)) & 0xffff
         elif mode in (1, 2, 3):
             ea = self.ea_ptr(mode, s)
         elif mode == 5:
@@ -525,7 +523,7 @@ class Ref:
     def st_dst(self, words, fmt, s, v):
         w = words[0]
         if fmt == 1:
-            self.wr((self.sfp + 2 * sext(w & 0x7f, 7)) & 0xffff, s, v)
+            self.wr((self.pfp + 2 * sext(w & 0x7f, 7)) & 0xffff, s, v)
             return
         mode, x, _ = gen_operand(w)
         if mode == 0:
@@ -572,7 +570,7 @@ class Program:
         self.live = True
         self.max_depth = MAX_DEPTH
 
-        # inside a function: (argument words above the link, variadic)
+        # inside a function: (argument words from PFP up, variadic)
         self.frame = None
         self.funcs = []
 
@@ -667,7 +665,7 @@ class Program:
                 dd,
                 s,
                 r.randrange(
-                    -min(d, 64), 64 if self.frame is None else self.frame[0] + 1
+                    -min(d, 64), 64 if self.frame is None else max(self.frame[0], 1)
                 )
             )
         if kind == 'ptr':
@@ -812,8 +810,8 @@ class Program:
     def pfp_store(self, d):
         """
         A word offset for a store relative to PFP, or None. In a function
-        it must not hit the saved PFP or the count: only the stack items
-        below PFP and the arguments.
+        it must not hit the count: only the stack items below PFP and the
+        arguments.
         """
         r = self.rng
         if self.frame is None:
@@ -822,7 +820,7 @@ class Program:
         cands = list(
             range(-min(d, 64), 0)
         ) + list(
-            range(2 if variadic else 1, words + 1)
+            range(1 if variadic else 0, words)
         )
         return r.choice(cands) if cands else None
 
@@ -997,6 +995,9 @@ class Program:
         for _ in range(r.randint(2, 20)):
             self.random_op(allow_calls=True)
         self.set_far()
+        if self.depth:
+            # release the locals and what is left on the stack: PSP = PFP
+            self.emit(i_addp(2, 2 * self.depth), -self.depth)
         if variadic:
             self.emit(i_misc(MISC_RET_VAR))
         else:

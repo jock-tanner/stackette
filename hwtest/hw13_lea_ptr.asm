@@ -8,7 +8,7 @@ start:  ld push, [0xf02e]       ; interrupt ID, 0 after power-up
         skip ne
         bra illegal
 
-; A: lea: SFP is 0xf000 here; all four dd forms, no flags
+; A: lea: PFP is 0xf000 here; all four dd forms, no flags
         setb #0x1f
         lea push, [pfp-4]
         skip cs

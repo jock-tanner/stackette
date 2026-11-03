@@ -16,7 +16,7 @@ Syntax, one instruction per line; `;` starts a comment, `name:` defines a label:
     ld.b / st.b         8-bit access (ld.bs: byte load, sign-extended, only from
                         memory through a pointer: [mbp+midx], [mbp+midx++],
                         [mbp+--midx], [tos], and from [abs] and [sp+k], k >= 4)
-    lea DD, [pfp+n]     DD: tos, nos, push, under; the address SFP+n (n even, -128..126)
+    lea DD, [pfp+n]     DD: tos, nos, push, under; the address PFP+n (n even, -128..126)
                         goes on the stack like a loaded value. The flags are not
                         changed.
     ld, st, the ALU ops and swap also take [tos] as the memory operand: the
@@ -40,8 +40,9 @@ Control flow:
     call LABEL          call, the same offset; call pop: target taken off the stack
     jmp EXPR            jump to an absolute address (two words)
     calla EXPR          call an absolute address (two words)
-    ret #n              return, dropping n argument words (0..63) above the saved SFP
-    ret                 return, taking the count from the frame ([pfp+2], it counts itself)
+    ret #n              return: PSP += 2n (n 0..63), after the callee has released its locals;
+                        the result is at the top of what is left
+    ret                 return: n is the word at [pfp] (the variadic form: the caller pushed it last)
     addp REG, #i        REG (mbp, midx or sp) += i, a signed byte count -128..127
     skip CC             skip the next instruction (of any length) if CC holds
     not neg sxt bswap rlc rrc  DD
@@ -76,9 +77,11 @@ Status register `sr` (a register operand like any other): bit 0 C, 1 Z, 2 N, 3 V
 Conditions: eq ne | cs cc (unsigned >= <) | mi pl | vs vc | hi ls (unsigned > <=) |
 ge lt gt le (signed) | pe po (parity even, odd). After sub/sbc, C means no borrow.
 Aliases: z nz, hs lo, c nc. LD and ST do not change the flags.
-A call pushes the return address on the return stack and the caller's SFP on the
-parameter stack; SFP then points at it. The arguments pushed before the call are
-above it, for `ret` with the count word as the last one pushed.
+A call pushes the return address and then the caller's PFP on the return stack
+(the address on top), and PFP becomes PSP: the arguments pushed before the call
+start at [pfp], the last one pushed first. The callee releases its own locals
+and leaves its result in the deepest words it wants to keep; ret only restores
+PFP and adds to PSP.
 
 Stack part DD (see the encoding table):
     ld tos, X   TOS <- X          st X, tos   X <- TOS

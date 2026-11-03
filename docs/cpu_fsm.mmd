@@ -38,16 +38,16 @@ flowchart TD
   subgraph CR["CALL, RET, ADDP"]
     CALL_POP["CALL_POP"]
     CALL_RA["CALL_RA<br/>push the return address"]
-    CALL_LINK["CALL_LINK<br/>link the frame"]
+    CALL_LINK["CALL_LINK<br/>push the saved PFP"]
     RET_FLUSH["RET_FLUSH"]
     RET_IDLE["RET_IDLE"]
-    RET_CNT_RD["RET_CNT_RD<br/>RET with a count word"]
+    RET_CNT_RD["RET_CNT_RD<br/>variadic RET: count at [pfp]"]
     RET_CNT_WAIT["RET_CNT_WAIT"]
-    RET_LNK_RD["RET_LNK_RD<br/>saved SFP"]
+    RET_LNK_RD["RET_LNK_RD<br/>saved PFP"]
     RET_LNK_WAIT["RET_LNK_WAIT"]
     RET_IP_RD["RET_IP_RD<br/>return address"]
     RET_IP_WAIT["RET_IP_WAIT"]
-    RET_SP["RET_SP<br/>drop the frame"]
+    RET_SP["RET_SP<br/>psp += 2n"]
     ADDP_SP["ADDP_SP<br/>sp += i"]
   end
   subgraph EX["exceptions and contexts"]
@@ -82,7 +82,8 @@ flowchart TD
   EXEC -->|"ST"| ST_POP
   EXEC -->|"CALL"| CALL_POP
   EXEC -->|"CALL direct"| CALL_RA
-  EXEC -->|"RET"| RET_FLUSH
+  EXEC -->|"RET (variadic)"| RET_FLUSH
+  EXEC -->|"RET #n"| RET_IP_RD
   EXEC -->|"ADDP SP"| ADDP_SP
   EXEC -->|"BRA, JMP, SKIP, SETB, CLRB,<br/>ADDP MBP, MIDX"| NEXT
   EXEC -->|"RETI (system only)"| SW_FLUSH
@@ -116,10 +117,9 @@ flowchart TD
 
   CALL_POP --> CALL_RA --> CALL_LINK --> NEXT
   RET_FLUSH --> RET_IDLE
-  RET_IDLE -->|"RET with a count"| RET_CNT_RD
-  RET_IDLE -->|"RET #n"| RET_LNK_RD
-  RET_CNT_RD --> RET_CNT_WAIT --> RET_LNK_RD
-  RET_LNK_RD --> RET_LNK_WAIT --> RET_IP_RD --> RET_IP_WAIT --> RET_SP --> NEXT
+  RET_IDLE --> RET_CNT_RD
+  RET_CNT_RD --> RET_CNT_WAIT --> RET_IP_RD
+  RET_IP_RD --> RET_IP_WAIT --> RET_LNK_RD --> RET_LNK_WAIT --> RET_SP --> NEXT
   ADDP_SP --> NEXT
 
   FETCH -.->|"IRQ in user context,<br/>asynchronous write-back fault,<br/>request refused"| ABORT

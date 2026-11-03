@@ -133,8 +133,8 @@ def run_case(seed, n_instr=150, p_fault=0.0, user=False):
         assert flags == prog.ref.flags, (
             f'seed {seed}: flags {flags:05b}, expected {prog.ref.flags:05b}'
         )
-        assert (ctx.get(dut.sfp), ctx.get(dut.rsp)) == (prog.ref.sfp, prog.ref.rsp), (
-            f'seed {seed}: SFP and RSP are {ctx.get(dut.sfp):#06x}, '
+        assert (ctx.get(dut.pfp), ctx.get(dut.rsp)) == (prog.ref.pfp, prog.ref.rsp), (
+            f'seed {seed}: PFP and RSP are {ctx.get(dut.pfp):#06x}, '
             f'{ctx.get(dut.rsp):#06x}'
         )
         for lo, hi in compare_ranges(prog):
