@@ -27,7 +27,7 @@ OP_SWAP = 10
 OP_LEA = 11
 OP_CMP = 12
 OP_TST = 13
-U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC = range(6)
+U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC, U_SHR, U_SAR = range(8)
 REG_TOS = 0
 REG_NOS = 1
 REG_MBP = 2
@@ -402,8 +402,12 @@ class Ref:
             r = full & mask
             self.c = full >> bits & 1
             self.v = (a >> (bits - 1) ^ r >> (bits - 1)) & 1
-        else:
+        elif op == U_RRC:
             r = self.c << (bits - 1) | a >> 1
+            self.c = a & 1
+        else:
+            sign = a >> (bits - 1) & 1 if op == U_SAR else 0
+            r = sign << (bits - 1) | a >> 1
             self.c = a & 1
         self.z = int(r == 0)
         self.n = r >> (bits - 1) & 1
@@ -737,7 +741,7 @@ class Program:
         if d < self.max_depth:
             dds += [3]
         dd = r.choice(dds)
-        op = r.randrange(6)
+        op = r.randrange(8)
         s = 0 if op in (U_SXT, U_BSWAP) else r.getrandbits(1)
         self.emit(i_unary(op, dd, s), 1 if dd >= 2 else 0)
         return True

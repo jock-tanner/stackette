@@ -2,12 +2,13 @@
 
 **Stackette** is a 16-bit, little-endian, byte-addressing, 16-bit instruction
 words (some are followed by one 16-bit extra word), stack-oriented machine.
-8-bit operations (`.b`) use the low byte and zero-extend the result into the
-16-bit destination.
+8-bit operations (`.b`, `.bs`) use the low byte and zero- or sign-extend the
+result into the 16-bit destination.
 
 ## Programming model
 As is often the case with modern stack-based architectures, **Stackette**
-has two separate stacks: return stack, and parameter stack.
+has two separate stacks: return stack, and parameter stack. Stacks are
+word-sized and growing down, with pointer pointing to the word last pushed.
 
 Instead of general purpose registers, **Stackette** uses a small set of
 highly specialized registers, with accumulators doubling as a parameter stack
@@ -17,33 +18,19 @@ Currently, TOS and NOS implemented as a part of 4-word cache that follows the
 stack pointer (PSP), so a lot of stack primitives don't do memory access and/or
 really boils down to cache lines renaming.  
 
-Return stack used only for holding return addresses.
+Return stack is used only for backing up IP and PSP between `CALL` and `RET`.
 
 ### Registers summary
 
-| Mnemonic name | Purpose                                             | Value on reset |
-|---------------|-----------------------------------------------------|----------------|
-| IP            | instruction pointer                                 | 0              |
-| RSP           | return stack pointer                                | 0              |
-| PSP           | parameter stack pointer; contains words; grows down | 0xf000         |
-| SFP           | frame pointer, set by CALL/RET                      | 0xf000         |
-| TOS, NOS      | the top two parameter stack items (accumulators)    |                |
-| MBP, MIDX     | memory base and index: `[mbp+midx]`                 | 0              |
-| SR            | status: bit 0 C, 1 Z, 2 N, 3 V, 4 P (even parity)   | 0              |
-
-
-### Register operand codes
-
-| Encoded | Mnemonic name | Additional info                        |
-|---------|---------------|----------------------------------------|
-| 0       | TOS           | top-of-stack                           |
-| 1       | NOS           | next-of-stack                          |
-| 2       | MBP           |                                        |
-| 3       | MIDX          |                                        |
-| 4       | PSP           |                                        |
-| 5       | NULL          | reads as 0, written value is discarded |
-| 6       | SR            |                                        |
-| 15      | IP            |                                        |
+| Mnemonic name | Purpose                                             | Value on reset  |
+|---------------|-----------------------------------------------------|-----------------|
+| IP            | instruction pointer                                 | 0               |
+| RSP           | return stack pointer                                | 0               |
+| PSP           | parameter stack pointer; contains words; grows down | 0xf000          |
+| SFP           | frame pointer, set by CALL/RET                      | 0xf000          |
+| TOS, NOS      | the top two parameter stack items (accumulators)    | _not available_ |
+| MBP, MIDX     | memory base and index: `[mbp+midx]`                 | 0               |
+| SR            | status: bit 0 C, 1 Z, 2 N, 3 V, 4 P (even parity)   | 0               |
 
 ### Memory Management Unit
 
@@ -74,9 +61,7 @@ it as fault number 1 (request refused), or number 2 for a stack-cache fill.
 Instructions are split into four formats depending on bits 15:14 of the instruction
 word.
 
-Dyadic instructions takes 3/4 of instruction encoding space (00, 01, and 02).
-Depending on the destination (`dd`) format, they can be destructive or non-destructive,
-i.e. operate directly on stack elements or push the result. 
+### Dyadic instructions
 
 | Format | Bit layout             | Source                                                       |
 |--------|------------------------|--------------------------------------------------------------|
@@ -85,22 +70,28 @@ i.e. operate directly on stack elements or push the result.
 | 10     | `10 oooo dd s vvvvvvv` | general addressing, variable-encoded (see below)             |
 | 11     |                        | monadic, control, and various instruction (see below)        |
 
-### Format 10 variable-encoded fields
+Dyadic instructions takes 3/4 of instruction encoding space (00, 01, and 02).  Common
+parts of the dyadic instructions are operation code (`oooo`) and destination (`dd`).
+Depending on the destination (`dd`) format, they can be destructive or non-destructive,
+i.e. operate directly on stack elements or push the result.
 
-| Bit layout             | Addressing mode                                                                                                                                     |
-|------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `000 rrrr`             | register, encoded in `r`                                                                                                                            |
-| `0010 mm e`            | `mm`=0: index `[MBP + MIDX]`<br/>`mm`=1: post-increment `[MBP + MIDX++]`<br/>`mm`=2: pre-decrement `[MBP + --MIDX]`<br/>`mm`=3: TOS-related `[TOS]` |
-| `0011 xxx`             | reserved                                                                                                                                            |
-| `010000 e`             | absolute `[abs16]`, address word follows                                                                                                            |
-| `0100010`              | immediate `#imm16`, source word follows (illegal with ST)                                                                                           |
-| `0100011` to `0111111` | reserved                                                                                                                                            | 
-| `1 kkkkk e`            | PSP-relative `[PSP+2k]`, `kkkkk` is unsigned                                                                                                        |
+Available destinations, or stack operands (`dd`), are:
 
-Byte operand extension for LD: `e`=0 operand is zero-extended (`ld.b`), `e`=1 operand is sign-extended
-(`ld.bs`). May not be supported for PSP-relative addressing with operand in stack cache (`2k` < 4).
+| dd          | LD and ALU instructions                            | ST instruction   |
+|-------------|----------------------------------------------------|------------------|
+| 00 tos      | TOS = src (op)                                     | src = TOS        |
+| 01 nos      | NOS = src (op)                                     | src = NOS        |
+| 10 push/pop | LD: push; ALU: NOS op= src, drop TOS               | src = pop        |
+| 11 under    | LD: insert under TOS; ALU: TOS op= src, remove NOS | src = remove NOS |
 
-Dyadic operation codes (`oooo`) are defined as follows:
+Some dyadic instructions may treat destination differently.
+
+- `ST` (store) instruction reverses the source and destination, so instead of popping
+  the result off the stack it's pushing it on.
+- `SWAP` writes to both source and destination, so it cannot push or pop the result.
+  (`SWAP` with `dd`=10 or 11 are illegal instructions.)
+
+All dyadic operation codes (`oooo`) are encoded as follows:
 
 | Code | Mnemonic | Meaning                                                                                         |
 |------|----------|-------------------------------------------------------------------------------------------------|
@@ -116,43 +107,81 @@ Dyadic operation codes (`oooo`) are defined as follows:
 | 9    | ST       | Store or pop (target and source reversed)                                                       | 
 | 10   | SWAP     | Atomically exchange target with source                                                          |
 | 11   | LEA      | Calculates the absolute address of an operand in parameter stack. Format 01 and word-size only. |
+| 12   | CMP      | Arithmetic compare (subtracts source from dest, sets flags and throws away the result)          |
+| 13   | TST      | Bit test (similar to AND, but discards result)                                                  |
 
 Bit `s` set signifies the byte form of the instruction. Mnemonic suffix `.b`
 zero-extends the byte operand, and `.bs` sign-extends it. Only LD in
 indexed modes provides the ability to choose between zero and sign. Other
 instructions extends byte operands with zero.
 
-`dd` (stack operand, or target):
+### Format 10 variable-encoded fields (`vvvvvvv`)
 
-| dd          | LD and ALU instructions                            | ST instruction   |
-|-------------|----------------------------------------------------|------------------|
-| 00 tos      | TOS = src (op)                                     | src = TOS        |
-| 01 nos      | NOS = src (op)                                     | src = NOS        |
-| 10 push/pop | LD: push; ALU: NOS op= src, drop TOS               | src = pop        |
-| 11 under    | LD: insert under TOS; ALU: TOS op= src, remove NOS | src = remove NOS |
+This is the most complex part of dyadic instruction variants in both function
+and encoding.
+
+| Bit layout             | Addressing mode                                                                                                                                     |
+|------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `000 rrrr`             | register, encoded in `r`                                                                                                                            |
+| `0010 mm e`            | `mm`=0: index `[MBP + MIDX]`<br/>`mm`=1: post-increment `[MBP + MIDX++]`<br/>`mm`=2: pre-decrement `[MBP + --MIDX]`<br/>`mm`=3: TOS-related `[TOS]` |
+| `0011 xxx`             | reserved                                                                                                                                            |
+| `010000 e`             | absolute `[abs16]`, address word follows                                                                                                            |
+| `0100010`              | immediate `#imm16`, source word follows (illegal with ST)                                                                                           |
+| `0100011` to `0111111` | reserved                                                                                                                                            | 
+| `1 kkkkk e`            | PSP-relative `[PSP+2k]`, `kkkkk` is unsigned                                                                                                        |
+
+Byte operand extension for LD: `e`=0 operand is zero-extended (`ld.b`), `e`=1 operand
+is sign-extended (`ld.bs`). May not be supported for PSP-relative addressing with operand
+in stack cache (`2k` < 4).
+
+### Register operand codes (`rrrr`)
+
+| Encoded | Mnemonic name | Additional info                        |
+|---------|---------------|----------------------------------------|
+| 0000    | TOS           | top-of-stack                           |
+| 0001    | NOS           | next-of-stack                          |
+| 0010    | MBP           |                                        |
+| 0011    | MIDX          |                                        |
+| 0100    | PSP           |                                        |
+| 0101    | NULL          | reads as 0, written value is discarded |
+| 0110    | SR            |                                        |
+| 1111    | IP            |                                        |
 
 ### Monadic, Control, and Various Instructions (format 11)
 
-| Instruction                         | Encoding                   | Effect                                                                                  |
-|-------------------------------------|----------------------------|-----------------------------------------------------------------------------------------|
-| `BRA l`                             | `11 00 0 lllllllllll`      | branch (with 11-bit signed offset)                                                      |
-| `SKIP cc`                           | `11 00 10 cccc 000000`     | skip the next instruction (any length) if condition (`cc`) holds                        |
-| `SETB #m`                           | `11 01 0000 iiiiiiii`      | set SR bits                                                                             |
-| `CLRB #m`                           | `11 01 1000 iiiiiiii`      | clear SR bits                                                                           |
-| `ADDP MBP\|MIDX\|PSP, #i`           | `11 01 01 rr iiiiiiii`     | register (`rr`: 0 MBP, 1 MIDX, 2 PSP) += signed byte                                    |
-| `NOT\|NEG\|SXT\|BSWAP\|RLC\|RRC dd` | `11 10 00 dd s oooo 000`   | unary (`sxt`, `bswap` are word-only)                                                    |
-| `MULU\|MULS\|DIVU\|DIVS` (`.b`)     | `11 10 01 d g s 0000000`   | signed/unsigned (`g`) division/subtraction (`d`) over words/bytes (`s`) on stack        |
-| `CALL l`                            | `11 11 0 lllllllllll`      | call (with 11-bit word offset)                                                          |
-| `NOP`                               | `11 11 100000 000000`      | no-op                                                                                   |
-| `RET #n`                            | `11 11 100001 iiiiii`      | return and subtract #n words from PSP                                                   |
-| `RETI`                              | `11 11 100010 000000`      | enter (return to) user mode                                                             |
-| `TRAP #p`                           | `11 11 100100 iiiiii`      | system call                                                                             |
-| `CALLA abs`                         | `11 11 100101 000000`      | call (address in next word)                                                             |
-| `JMP abs`                           | `11 11 100110 000000`      | jump (address in next word)                                                             |
-| `CALL POP`                          | `11 11 100111 000000`      | call (pop address from stack)                                                           |
-| `RET [SFP+2]`                       | `11 11 101001 000000`      | return and subtract the number of words, supplied by caller in last parameter, from PSP |
+| Instruction                                   | Encoding                   | Effect                                                                                  |
+|-----------------------------------------------|----------------------------|-----------------------------------------------------------------------------------------|
+| `BRA l`                                       | `11 00 0 lllllllllll`      | branch (with 11-bit signed offset)                                                      |
+| `SKIP cc`                                     | `11 00 10 cccc 000000`     | skip the next instruction (any length) if condition (`cc`) holds                        |
+| `SETB #m`                                     | `11 01 0000 iiiiiiii`      | set SR bits                                                                             |
+| `CLRB #m`                                     | `11 01 1000 iiiiiiii`      | clear SR bits                                                                           |
+| `ADDP MBP\|MIDX\|PSP, #i`                     | `11 01 01 rr iiiiiiii`     | register (`rr`: 0 MBP, 1 MIDX, 2 PSP) += signed byte                                    |
+| `NOT\|NEG\|SXT\|BSWAP\|RLC\|RRC\|SHR\|SAR dd` | `11 10 00 dd s oooo 000`   | monadic instructions (see below)                                                        |
+| `MULU\|MULS\|DIVU\|DIVS` (`.b`)               | `11 10 01 d g s 0000000`   | signed/unsigned (`g`) division/subtraction (`d`) over words/bytes (`s`) on stack        |
+| `CALL l`                                      | `11 11 0 lllllllllll`      | call (with 11-bit word offset)                                                          |
+| `NOP`                                         | `11 11 100000 000000`      | no-op                                                                                   |
+| `RET #n`                                      | `11 11 100001 iiiiii`      | return and subtract #n words from PSP                                                   |
+| `RETI`                                        | `11 11 100010 000000`      | enter (return to) user mode                                                             |
+| `TRAP #p`                                     | `11 11 100100 iiiiii`      | system call                                                                             |
+| `CALLA abs`                                   | `11 11 100101 000000`      | call (address in next word)                                                             |
+| `JMP abs`                                     | `11 11 100110 000000`      | jump (address in next word)                                                             |
+| `CALL POP`                                    | `11 11 100111 000000`      | call (pop address from stack)                                                           |
+| `RET [SFP +2 ]`                               | `11 11 101001 000000`      | return and subtract the number of words, supplied by caller in last parameter, from PSP |
 
-Everything else is an illegal instruction.
+Monadic instructions are performed on stack destination (`dd`). `SXT`
+and `BSWAP` are word-only, other instructions have byte- and word-size
+variants (bit `s`).
+
+| Opcode (`oooo`) | Mnemonic   | Effect                                         |
+|-----------------|------------|------------------------------------------------|
+| 0000            | `NOT dd`   | logical inversion of `dd`                      |
+| 0001            | `NEG dd`   | sign change in two's complement representation |
+| 0010            | `SXT dd`   | extend sign of lower byte to high byte         |
+| 0011            | `BSWAP dd` | swap low and high bytes                        |
+| 0100            | `RLC dd`   | rotate operand left through the carry bit      |
+| 0100            | `RRC dd`   | rotate operand right through the carry bit     |
+| 0100            | `SHR dd`   | right logical shift                            |
+| 0100            | `SAR dd`   | right arithmetic shift                         |
 
 **MUL/DIV** operates on TOS and NOS with stack depth unchanged. Location of
 operands and result: 
@@ -168,6 +197,8 @@ operands and result:
 | NOS | dividend | remainder (sign of the dividend) |
  
 Division by zero is fault 4, NOS and TOS remain unchanged.
+
+Everything else is an illegal instruction.
 
 ## Flags and conditions
 
@@ -199,6 +230,25 @@ but similar to MOS 6502, ARM, or PowerPC.
 
 ## Calls and Returns
 
+There are multiple instructions in `CALL` and `RET` groups.
+
+| Mnemonic    | Effect                                                                      |
+|-------------|-----------------------------------------------------------------------------|
+| `CALL l`    | Computes function address as `IP ± l`, where `l` is a signed 11-bit offset. |
+| `CALLA abs` | Function address is in a next instruction word.                             |
+| `CALL POP`  | Function address is popped off the parameter stack.                         |
+|             |                                                                             |
+| `RET #n`    | Cleans up #n words from stack, then returns.                                |
+| `RET [SPF]` | Treats the last function parameter as a word count for cleanup.             |
+
+**Stackette** has two different stacks: return stack, and parameter stack.
+All instructions of the `CALL` group push IP and PFP registers on the return
+stack, while `RET`s pop them from there.
+
+The other thing `CALL`s and `RET`s have to take care of is a stack frame.
+`CALL` instructions copies `PSP` to `PFP`, assuming the caller had pushed all
+the function parameters. `RET` instructions do the frame cleanup. 
+
 There are two categories of calling conventions, depending on caller or callee
 doing stack cleanup. When stack is cleaned up by the caller, each call is
 followed by the same stack correction code, which is a waste of program space.
@@ -207,10 +257,10 @@ parameters were passed by the caller, which is complicates variadic function
 support.
 
 **Stackette** ISA is aimed at the sweet spot:
-- `call` pushes the return address on the return stack and the caller's PFP 
-  on the parameter stack; SFP then loads in PFP, arguments are above it;
+- `call` pushes the return address and the caller's PFP on the return stack;  
+  PSP then loads in PFP, arguments are above it;
 - `ret #n` drops n argument words;
-- `ret` takes the count from `[sfp+2]` (a count word, counting itself, pushed
+- `ret` takes the n count from `pfp` (a count word, counting itself, pushed
   last), for variable argument lists.
 
 ## Contexts and exceptions

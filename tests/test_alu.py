@@ -43,8 +43,9 @@ CHECK_PARITY = True
 
 LOGIC = {
     OpCodes.AND, OpCodes.OR, OpCodes.XOR, OpCodes.BIC, OpCodes.NOT,
-    OpCodes.SXT, OpCodes.BSWAP, OpCodes.RRC
+    OpCodes.SXT, OpCodes.BSWAP,
 }
+SHIFTS_RIGHT = {OpCodes.RRC, OpCodes.SHR, OpCodes.SAR}
 WORD_ONLY = {OpCodes.SXT, OpCodes.BSWAP}
 FIELDS = ('result', 'carry', 'overflow', 'zero', 'sign', 'parity')
 
@@ -57,49 +58,60 @@ def ref(op, a, b, cin, bits):
     b &= mask
     carry = overflow = 0
 
-    if op in (OpCodes.ADD, OpCodes.ADC):
-        t = a + b + (cin if op == OpCodes.ADC else 0)
-        res = t & mask
-        carry = (t >> bits) & 1
-        overflow = int(bool((a ^ res) & (b ^ res) & msb))
-    elif op in (OpCodes.SUB, OpCodes.SBC):
-        if op == OpCodes.SUB:
-            borrow_in = 0
-        else:
-            borrow_in = (1 - cin) if CARRY_IS_NOT_BORROW else cin
-        t = a - b - borrow_in
-        res = t & mask
-        borrow = int(t < 0)
-        carry = (1 - borrow) if CARRY_IS_NOT_BORROW else borrow
-        overflow = int(bool((a ^ b) & (a ^ res) & msb))
-    elif op == OpCodes.AND:
-        res = a & b
-    elif op == OpCodes.OR:
-        res = a | b
-    elif op == OpCodes.XOR:
-        res = a ^ b
-    elif op == OpCodes.BIC:
-        res = a & ~b & mask
-    elif op == OpCodes.NOT:
-        res = ~a & mask
-    elif op == OpCodes.SXT:
-        res = (a & 0xFF) | (0xFF00 if a & 0x80 else 0)
-    elif op == OpCodes.BSWAP:
-        res = ((a & 0xFF) << 8) | (a >> 8)
-    elif op == OpCodes.RRC:
-        res = (cin << (bits - 1)) | (a >> 1)
-        carry = a & 1
-    elif op == OpCodes.NEG:
-        res = (-a) & mask
-        zero_src = int(a == 0)
-        carry = zero_src if CARRY_IS_NOT_BORROW else 1 - zero_src
-        overflow = int(a == msb)
-    else:
-        raise ValueError(op)
+    match op:
+        case OpCodes.ADD | OpCodes.ADC:
+            t = a + b + (cin if op == OpCodes.ADC else 0)
+            res = t & mask
+            carry = (t >> bits) & 1
+            overflow = int(bool((a ^ res) & (b ^ res) & msb))
+        case OpCodes.SUB | OpCodes.SBC:
+            if op == OpCodes.SUB:
+                borrow_in = 0
+            else:
+                borrow_in = (1 - cin) if CARRY_IS_NOT_BORROW else cin
+            t = a - b - borrow_in
+            res = t & mask
+            borrow = int(t < 0)
+            carry = (1 - borrow) if CARRY_IS_NOT_BORROW else borrow
+            overflow = int(bool((a ^ b) & (a ^ res) & msb))
+        case OpCodes.AND:
+            res = a & b
+        case OpCodes.OR:
+            res = a | b
+        case OpCodes.XOR:
+            res = a ^ b
+        case OpCodes.BIC:
+            res = a & ~b & mask
+        case OpCodes.NOT:
+            res = ~a & mask
+        case OpCodes.SXT:
+            res = (a & 0xFF) | (0xFF00 if a & 0x80 else 0)
+        case OpCodes.BSWAP:
+            res = ((a & 0xFF) << 8) | (a >> 8)
+        case OpCodes.NEG:
+            res = (-a) & mask
+            zero_src = int(a == 0)
+            carry = zero_src if CARRY_IS_NOT_BORROW else 1 - zero_src
+            overflow = int(a == msb)
+        case OpCodes.RRC:
+            res = (cin << (bits - 1)) | (a >> 1)
+            carry = a & 1
+        case OpCodes.SAR:
+            res = a >> 1
+            if a & msb:
+                # negative — mask the high bit
+                res |= msb
+            # carry gets the bit that fell out
+            carry = a & 1
+        case OpCodes.SHR:
+            res = a >> 1
+            carry = a & 1
+        case _:
+            raise ValueError(op)
 
     return {
         'result': res,
-        'carry': carry if op == OpCodes.RRC or op not in LOGIC else None,
+        'carry': carry if op in SHIFTS_RIGHT or op not in LOGIC else None,
         'overflow': None if op in LOGIC else overflow,
         'zero': int(res == 0),
         'sign': int(bool(res & msb)),

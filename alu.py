@@ -11,6 +11,10 @@ class OpCodes(Enum, shape=4):
     SBC = 0b0011
     NEG = 0b0100
 
+    # shifts right by one bit, the carry gets the bit that fell out
+    SHR = 0b0101
+    SAR = 0b0110
+
     # logical
     AND = 0b1000
     OR  = 0b1001
@@ -169,5 +173,23 @@ class ALU(Component):
                         adder.operand_a.eq(i_neg_a),
                         adder.operand_b.eq(0),
                     ]
+                # the shifts do not use the adder: they override its result
+                with m.Case(OpCodes.SHR, OpCodes.SAR):
+                    msb = Signal()
+                    m.d.comb += [
+                        msb.eq(
+                            Mux(
+                                self.op_code == OpCodes.SAR,
+                                Mux(self.size, i_a[7], i_a[15]),
+                                0,
+                            )
+                        ),
+                        self.carry.eq(i_a[0]),
+                        self.overflow.eq(0),
+                    ]
+                    with m.If(self.size):
+                        m.d.comb += i_result.eq(Cat(i_a[1:8], msb))
+                    with m.Else():
+                        m.d.comb += i_result.eq(Cat(i_a[1:16], msb))
 
         return m

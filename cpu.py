@@ -51,6 +51,8 @@ UOP_SXT = 2
 UOP_BSWAP = 3
 UOP_RLC = 4
 UOP_RRC = 5
+UOP_SHR = 6
+UOP_SAR = 7
 MISC_NOP = 0
 MISC_RET_N = 1
 MISC_RETI = 2
@@ -313,7 +315,7 @@ class CPU(Component):
 
         # SXT and BSWAP are word operations
         ok_unary = (
-                is_unary & (u_op < 6)
+                is_unary & (u_op < 8)
                 & ~(s & ((u_op == UOP_SXT) | (u_op == UOP_BSWAP)))
         )
         ok_ctl = (
@@ -568,7 +570,10 @@ class CPU(Component):
         set_v = Signal()
         with m.If(is_unary):
             m.d.comb += [
-                set_c.eq((u_op == UOP_NEG) | (u_op == UOP_RLC) | (u_op == UOP_RRC)),
+                set_c.eq(
+                    (u_op == UOP_NEG) | (u_op == UOP_RLC) | (u_op == UOP_RRC)
+                    | (u_op == UOP_SHR) | (u_op == UOP_SAR)
+                ),
                 set_v.eq((u_op == UOP_NEG) | (u_op == UOP_RLC)),
             ]
         with m.Else():
@@ -591,6 +596,10 @@ class CPU(Component):
                     m.d.comb += alu.op_code.eq(OpCodes.ADC)
                 with m.Case(UOP_RRC):
                     m.d.comb += alu.op_code.eq(OpCodes.RRC)
+                with m.Case(UOP_SHR):
+                    m.d.comb += alu.op_code.eq(OpCodes.SHR)
+                with m.Case(UOP_SAR):
+                    m.d.comb += alu.op_code.eq(OpCodes.SAR)
         with m.Elif(is_cmp):
             m.d.comb += alu.op_code.eq(Mux(op[0], OpCodes.AND, OpCodes.SUB))
         with m.Else():

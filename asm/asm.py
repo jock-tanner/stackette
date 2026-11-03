@@ -50,13 +50,19 @@ Control flow:
     ret                 return: n is the word at [pfp] (the variadic form: the caller pushed it last)
     addp REG, #i        REG (mbp, midx or sp) += i, a signed byte count -128..127
     skip CC             skip the next instruction (of any length) if CC holds
-    not neg sxt bswap rlc rrc  DD
+    not neg sxt bswap rlc rrc shr sar  DD
                         unary operation (.b for 8 bits, not for sxt and bswap). The
                         operand is TOS for tos and under, NOS for nos and push; tos
                         and nos replace it, push puts the result on top of the stack
                         and under inserts it below TOS, the operand stays.
-                        neg and rlc set C Z N V P, rrc C Z N P, the others Z N P.
-                        rlc and rrc rotate through the carry.
+                        neg and rlc set C Z N V P, rrc shr sar C Z N P, the others Z N P.
+                        rlc and rrc rotate through the carry. shr and sar shift right
+                        by one bit (shr puts 0 in at the top, sar copies the sign) and
+                        the carry gets the bit that fell out, so a long shift is two
+                        instructions: `shr nos` + `rrc tos` for the logical right
+                        shift of a long (low word TOS), `sar nos` + `rrc tos` for the
+                        arithmetic one, and `add tos, tos` + `adc nos, nos` for the
+                        left shift.
     mulu muls divu divs  (.b for 8 bits; no operands)
                         NOS and TOS are replaced by two results: TOS gets the
                         primary one, NOS the secondary one. mul: TOS * NOS, low part
@@ -230,7 +236,10 @@ def w_gen(op, dd, s, field, extra=None):
     return [w] if extra is None else [w, extra & 0xffff]
 
 
-UNARY = {'not': 0, 'neg': 1, 'sxt': 2, 'bswap': 3, 'rlc': 4, 'rrc': 5}
+UNARY = {
+    'not': 0, 'neg': 1, 'sxt': 2, 'bswap': 3, 'rlc': 4, 'rrc': 5,
+    'shr': 6, 'sar': 7,
+}
 # multiplication and division take no operands: NOS and TOS are replaced by
 # the primary result (TOS) and the secondary one (NOS)
 MULDIV = {'mulu': 0xe400, 'muls': 0xe500, 'divu': 0xe600, 'divs': 0xe700}

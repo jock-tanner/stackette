@@ -151,6 +151,7 @@ def run_program(
     ('hw9_irq.asm', b'ABCDE', 120000, ()),
     ('hw14_operands.asm', b'ABCDEFGHIJ', 20000, ()),
     ('hw15_cmp_tst.asm', b'ABCDEFGH', 12000, ()),
+    ('hw16_shift.asm', b'ABCDEFGH', 20000, ()),
 ])
 @pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.5)])
 def test_sync_mmu(name, expected, cycles, received, seed, p_ready):
@@ -235,8 +236,17 @@ def test_operands(seed, p_ready):
     assert out == expected, f'seed {seed}: the output is {out!r}'
 
 
-# CMP and TST: the item compared, pop and under, flags, bytes, memory operands
 for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+    # CMP and TST: the item compared, pop and under, flags, bytes, memory
+    # operands
     expected = b'ABCDEFGH'
     out, seen = run_program('hw15_cmp_tst.asm', seed, 6000, p_ready, expected)
     assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+    # arithmetic and logical right shifts
+    expected = b'ABCDEFGH'
+    out, seen = run_program('hw16_shift.asm', seed, 20000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
