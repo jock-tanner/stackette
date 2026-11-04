@@ -245,7 +245,7 @@ class Ref:
                 top = self.item(0)
                 self.psp += 2
                 self.wr16(self.psp, top)
-            self.st_dst(words, fmt, s, v)
+            return self.st_dst(words, fmt, s, v)
 
     @staticmethod
     def length(w):
@@ -563,6 +563,8 @@ class Ref:
                 self.psp = v8
             elif x == REG_SR:
                 self.set_flags(v8)
+            elif x == REG_IP:
+                return v8
         elif mode in (1, 2, 3):
             ea = self.ea_ptr(mode, s)
             self.wr(ea, s, v)

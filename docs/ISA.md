@@ -257,10 +257,11 @@ parameters were passed by the caller, which is complicates variadic function
 support.
 
 **Stackette** ISA is aimed at the sweet spot:
-- `call` pushes the return address and the caller's PFP on the return stack;  
-  PSP then loads in PFP, arguments are above it;
+- `call` loads PFP from PSP, arguments are above it (PFP wit positive offsets),
+  return value(s) and local variables are below it (negative offsets). Variadic
+  functions must push an argument count word last;
 - `ret #n` drops n argument words;
-- `ret` takes the n count from `pfp` (a count word, counting itself, pushed
+- `ret [pfp]` takes the n count from `pfp` (a count word, counting itself, pushed
   last), for variable argument lists.
 
 ## Contexts and exceptions
