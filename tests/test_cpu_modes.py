@@ -152,6 +152,7 @@ def run_program(
     ('hw14_operands.asm', b'ABCDEFGHIJ', 20000, ()),
     ('hw15_cmp_tst.asm', b'ABCDEFGH', 12000, ()),
     ('hw16_shift.asm', b'ABCDEFGH', 20000, ()),
+    ('hw17_variadic.asm', b'ABCDEFG', 24000, ()),
 ])
 @pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.5)])
 def test_sync_mmu(name, expected, cycles, received, seed, p_ready):
@@ -236,7 +237,8 @@ def test_operands(seed, p_ready):
     assert out == expected, f'seed {seed}: the output is {out!r}'
 
 
-for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_cmp_tst(seed, p_ready):
     # CMP and TST: the item compared, pop and under, flags, bytes, memory
     # operands
     expected = b'ABCDEFGH'
@@ -244,9 +246,18 @@ for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
     assert out == expected, f'seed {seed}: the output is {out!r}'
 
 
-for seed, p_ready in ((1, 1.0), (2, 0.6), (3, 0.3)):
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_shifts(seed, p_ready):
     # arithmetic and logical right shifts
     expected = b'ABCDEFGH'
     out, seen = run_program('hw16_shift.asm', seed, 20000, p_ready, expected)
     assert out == expected, f'seed {seed}: the output is {out!r}'
 
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_variadic(seed, p_ready):
+    # variadic calls: the count word, the result through a pointer, the
+    # variadic RET, a pad word for a long result, nested calls
+    expected = b'ABCDEFG'
+    out, seen = run_program('hw17_variadic.asm', seed, 12000, p_ready, expected)
+    assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
