@@ -63,17 +63,21 @@ word.
 
 ### Dyadic instructions
 
-| Format | Bit layout             | Source                                                       |
-|--------|------------------------|--------------------------------------------------------------|
-| 00     | `00 oooo dd iiiiiiii`  | 8-bit immediate (sign-extended; zero-extended for logic ops) |
-| 01     | `01 oooo dd s fffffff` | stack frame operand `[sfp + 2*simm7]`                        |
-| 10     | `10 oooo dd s vvvvvvv` | general addressing, variable-encoded (see below)             |
-| 11     |                        | monadic, control, and various instruction (see below)        |
-
 Dyadic instructions takes 3/4 of instruction encoding space (00, 01, and 02).  Common
 parts of the dyadic instructions are operation code (`oooo`) and destination (`dd`).
 Depending on the destination (`dd`) format, they can be destructive or non-destructive,
 i.e. operate directly on stack elements or push the result.
+
+| Format | Bit layout             | Source                                                |
+|--------|------------------------|-------------------------------------------------------|
+| 00     | `00 oooo dd iiiiiiii`  | 8-bit immediate (zero-extended)                       |
+| 01     | `01 oooo dd s fffffff` | stack frame operand `[sfp + 2*simm7]`                 |
+| 10     | `10 oooo dd s vvvvvvv` | general addressing, variable-encoded (see below)      |
+| 11     |                        | monadic, control, and various instruction (see below) |
+
+Format 01 is used to address local variables (positive offsets) and function parameters
+(negative offsets). In the absence of general purpose registers, it makes the most sense
+to use this mode for returning values as well.
 
 Available destinations, or stack operands (`dd`), are:
 
@@ -89,7 +93,9 @@ Some dyadic instructions may treat destination differently.
 - `ST` (store) instruction reverses the source and destination, so instead of popping
   the result off the stack it's pushing it on.
 - `SWAP` writes to both source and destination, so it cannot push or pop the result.
-  (`SWAP` with `dd`=10 or 11 are illegal instructions.)
+  (`SWAP` with `dd`=10 or 11 are illegal instructions),
+- `CMP` and `TST` do not change destination, but remove TOS (`dd`=10) or NOS (`dd`=11)
+  similar to `ST`.
 
 All dyadic operation codes (`oooo`) are encoded as follows:
 
@@ -166,7 +172,7 @@ in stack cache (`2k` < 4).
 | `CALLA abs`                                   | `11 11 100101 000000`      | call (address in next word)                                                             |
 | `JMP abs`                                     | `11 11 100110 000000`      | jump (address in next word)                                                             |
 | `CALL POP`                                    | `11 11 100111 000000`      | call (pop address from stack)                                                           |
-| `RET [SFP +2 ]`                               | `11 11 101001 000000`      | return and subtract the number of words, supplied by caller in last parameter, from PSP |
+| `RET [SFP]`                                   | `11 11 101001 000000`      | return and subtract the number of words, supplied by caller in last parameter, from PSP |
 
 Monadic instructions are performed on stack destination (`dd`). `SXT`
 and `BSWAP` are word-only, other instructions have byte- and word-size
@@ -269,6 +275,7 @@ support.
 System and user contexts have their own IP, RSP, SFP, MBP, MIDX, SR, PSP and
 MMU map; the stack cache is flushed on a switch. Power-up and soft reset start
 the system context at address 0. `RETI` (system only) runs the user context.
+`TRAP p` continues the system context execution after `RETI`.
 
 The system context runs on reset, when the user context traps, faults, or is
 interrupted. The cause is in the ID register: class in bits 7:6, number in 5:0.
@@ -286,10 +293,10 @@ changes), except the write-back fault, which is asynchronous.
 
 ## Peripherals (byte addresses in the data space, default map)
 
-| Address  | Device                                                                                                        |
-|----------|---------------------------------------------------------------------------------------------------------------|
-| 0xf000   | UART                                                                                                          |
-| 0xf008   | interrupt controller (RAW, MASK, ACTIVE)                                                                      |
-| 0xf010   | timer (COUNT, COMPARE, CONTROL, STATUS, PRESCALE)                                                             |
-| 0xf020   | context device: IP RSP SFP MBP MIDX SW PSP of the inactive context, then ID, FAULT_IP, FAULT_ADDR (read only) |
-| 0xf100   | MMU registers: 64 system, then 64 user (`space*16 + page`)                                                    |
+| Address  | Device                                                                                                              |
+|----------|---------------------------------------------------------------------------------------------------------------------|
+| 0xf000   | UART                                                                                                                |
+| 0xf008   | interrupt controller (RAW, MASK, ACTIVE)                                                                            |
+| 0xf010   | timer (COUNT, COMPARE, CONTROL, STATUS, PRESCALE)                                                                   |
+| 0xf020   | context device: IP, RSP, SFP, MBP, MIDX, SW, PSP of the inactive context, then ID, FAULT_IP, FAULT_ADDR (read only) |
+| 0xf100   | MMU registers: 64 system, then 64 user (`space*16 + page`)                                                          |
