@@ -153,6 +153,10 @@ def run_program(
     ('hw15_cmp_tst.asm', b'ABCDEFGH', 12000, ()),
     ('hw16_shift.asm', b'ABCDEFGH', 20000, ()),
     ('hw17_variadic.asm', b'ABCDEFG', 24000, ()),
+    ('hw18_kernel.asm', b'ABCDEFTGHZ', 120000, ()),
+    ('hw19_ipc.asm', b'ABCDEFGHIJKZ', 160000, ()),
+    ('hw20_timer.asm', b'ACBTTTSRZ', 120000, ()),
+    ('hw21_setjmp.asm', b'ABCDEFGHZ', 60000, ()),
 ])
 @pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.5)])
 def test_sync_mmu(name, expected, cycles, received, seed, p_ready):
@@ -261,3 +265,35 @@ def test_variadic(seed, p_ready):
     expected = b'ABCDEFG'
     out, seen = run_program('hw17_variadic.asm', seed, 12000, p_ready, expected)
     assert out == b'ABCDEFG', f'seed {seed}: the output is {out!r}'
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_kernel(seed, p_ready):
+    # creating and running user processes with different memory maps
+    expected = b'ABCDEFTGHZ'
+    out, seen = run_program('hw18_kernel.asm', seed, 60000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_ipc(seed, p_ready):
+    # passing messages between system and user modes
+    expected = b'ABCDEFGHIJKZ'
+    out, seen = run_program('hw19_ipc.asm', seed, 80000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_timer(seed, p_ready):
+    # test system timer interrupts
+    expected = b'ACBTTTSRZ'
+    out, seen = run_program('hw20_timer.asm', seed, 80000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_setjmp_longjmp(seed, p_ready):
+    # setjmp/longjmp syscall
+    expected = b'ABCDEFGHZ'
+    out, seen = run_program('hw21_setjmp.asm', seed, 60000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
