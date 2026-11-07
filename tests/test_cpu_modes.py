@@ -113,27 +113,27 @@ def run_program(
                 if not left:
                     break
 
-    # SWAP is atomic: a request of the RAM that is accepted while the CPU
-    # holds the memory is a read, and the next one is the write to the same
-    # address, with nothing else in between
+    # SWAP is atomic: the requests of the RAM that are accepted while the CPU
+    # holds the memory are the read and the write of the same address, or, for
+    # a word at an odd address, the reads of both bytes and then their writes,
+    # with nothing else in between
     async def atomic(ctx):
-        waiting = None
+        held = []
         while True:
             _, _, v, ready, we, addr, lock = await ctx.tick().sample(
                 dut.ram.req.valid, dut.ram.req.ready, dut.ram.req.we,
                 dut.ram.req.addr, dut.cpu.mem_lock)
-            if not (v and ready):
-                assert waiting is None or lock, 'the lock dropped too early'
-                continue
-            if waiting is not None:
-                assert lock and we and addr == waiting, (
-                    f'between the read and the write of a SWAP: {we} {addr}'
-                )
-                waiting = None
+            if v and ready and lock:
+                held.append((we, addr))
+            elif held and not lock:
+                a = held[0][1]
+                assert held in (
+                    [(0, a), (1, a)],
+                    [(0, a), (0, a + 1), (1, a), (1, a + 1)],
+                ), f'the requests of a SWAP: {held}'
+                held = []
                 seen['swaps'] += 1
-            elif lock:
-                assert not we, 'a write that starts a SWAP'
-                waiting = addr
+
 
     sim.add_testbench(bench)
     sim.add_testbench(atomic, background=True)
@@ -157,6 +157,7 @@ def run_program(
     ('hw19_ipc.asm', b'ABCDEFGHIJKZ', 160000, ()),
     ('hw20_timer.asm', b'ACBTTTSRZ', 120000, ()),
     ('hw21_setjmp.asm', b'ABCDEFGHZ', 60000, ()),
+    ('hw22_unaligned.asm', b'ABCDEFGH', 12000, ()),
 ])
 @pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.5)])
 def test_sync_mmu(name, expected, cycles, received, seed, p_ready):
@@ -296,4 +297,12 @@ def test_setjmp_longjmp(seed, p_ready):
     # setjmp/longjmp syscall
     expected = b'ABCDEFGHZ'
     out, seen = run_program('hw21_setjmp.asm', seed, 60000, p_ready, expected)
+    assert out == expected, f'seed {seed}: the output is {out!r}'
+
+
+@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
+def test_unaligned(seed, p_ready):
+    # unaligned word memory access
+    expected = b'ABCDEFGH'
+    out, seen = run_program('hw22_unaligned.asm', seed, 8000, p_ready, expected)
     assert out == expected, f'seed {seed}: the output is {out!r}'

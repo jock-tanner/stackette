@@ -188,12 +188,19 @@ class Ref:
         self.w[(a & 0xfffe) >> 1] = v & 0xffff
 
     def rd(self, a, s):
+        if not s and a & 1:
+            # a word at an odd address: two byte accesses
+            return self.rd(a, 1) | self.rd((a + 1) & 0xffff, 1) << 8
         w = self.rd16(a)
         if not s:
             return w
         return (w >> 8) & 0xff if a & 1 else w & 0xff
 
     def wr(self, a, s, v):
+        if not s and a & 1:
+            self.wr(a, 1, v & 0xff)
+            self.wr((a + 1) & 0xffff, 1, v >> 8 & 0xff)
+            return
         if not s:
             self.wr16(a, v)
             return

@@ -193,6 +193,12 @@ class CPU(Component):
         swapval = Signal(16)    # SWAP: the stack item that goes to memory
         ptr = Signal(16)        # [tos]: the address, taken from TOS
         lane = Signal()     # address bit 0 of a byte load
+        # A word access at an odd address in the data space is made as two
+        # byte accesses: the high lane of the word it starts in, then the
+        # low lane of the next word. `ph2` is high during the second one,
+        # `part` keeps the first byte of a load.
+        ph2 = Signal()
+        part = Signal(8)
         link = Signal(16)   # the caller's frame pointer, read by RET
         istart = Signal(16, init=IP_INIT)   # where the instruction being
                                             # executed starts (for a skipped
@@ -364,15 +370,23 @@ class CPU(Component):
         diff = Signal(16)
         m.d.comb += diff.eq(ea - stack.psp)
 
+        # a word at an odd address (only the abs16, [mbp+midx] and [tos]
+        # operands can have one: PFP and SP offsets are even)
+        split = Signal()
+        m.d.comb += split.eq(~s & ea[0])
+
         # when true, the CPU flushes the cache before a load, and flushes and
-        # invalidates it before a store, so memory and the cached lines agree
-        in_window = diff < 8
+        # invalidates it before a store, so memory and the cached lines agree;
+        # the second byte of an odd word may be the one at PSP
+        in_window = (diff < 8) | (split & (diff == 0xffff))
 
         byte_lo = Signal()
         byte_hi = Signal()
+        waddr = Signal(15)
         m.d.comb += [
-            byte_lo.eq(~s | ~ea[0]),
-            byte_hi.eq(~s | ea[0]),
+            byte_lo.eq(Mux(split, ph2, ~s | ~ea[0])),
+            byte_hi.eq(Mux(split, ~ph2, ~s | ea[0])),
+            waddr.eq(ea[1:] + ph2),
         ]
 
         # ---- values ----
@@ -450,14 +464,20 @@ class CPU(Component):
         wdata = Signal(16)
         m.d.comb += [
             val_sz.eq(Mux(s, val & 0xff, val)),
-            wdata.eq(Mux(s, Cat(val[0:8], val[0:8]), val)),
+            wdata.eq(Mux(
+                split,
+                Mux(ph2, val[8:16], Cat(C(0, 8), val[0:8])),
+                Mux(s, Cat(val[0:8], val[0:8]), val),
+            )),
         ]
 
         # what SWAP writes: byte stores go to both lanes, like ST's
         swap_wdata = Signal(16)
-        m.d.comb += swap_wdata.eq(
-            Mux(s, Cat(swapval[0:8], swapval[0:8]), swapval)
-        )
+        m.d.comb += swap_wdata.eq(Mux(
+            split,
+            Mux(ph2, swapval[8:16], Cat(C(0, 8), swapval[0:8])),
+            Mux(s, Cat(swapval[0:8], swapval[0:8]), swapval),
+        ))
 
         # sign extension flag of byte loads through pointers
         sx = (ptr_mode | tos_ptr | abs_mode | sp_mem) & s & e & ~is_swap
@@ -687,6 +707,7 @@ class CPU(Component):
 
             # ---- fetch ----
             with m.State('FETCH'):
+                m.d.sync += ph2.eq(0)
                 # a pending asynchronous fault or an interrupt is taken here,
                 # between two instructions, and the fetch is not made
                 take_irq = self.irq & user
@@ -854,7 +875,7 @@ class CPU(Component):
                     req.we.eq(0),
                     req.byte_hi.eq(byte_hi),
                     req.byte_lo.eq(byte_lo),
-                    req.addr.eq(ea[1:]),
+                    req.addr.eq(waddr),
                     self.mem_lock.eq(is_swap),
                 ]
                 with m.If(self.mem_fault):
@@ -865,8 +886,20 @@ class CPU(Component):
 
             with m.State('LD_RD_WAIT'):
                 m.d.comb += self.mem_lock.eq(is_swap)
-                with m.If(resp.valid):
-                    with m.If(s):
+                with m.If(resp.valid & split & ~ph2):
+                    # an odd word: the first byte is in, the second follows
+                    m.d.sync += [
+                        part.eq(resp.data[8:16]),
+                        ph2.eq(1),
+                    ]
+                    m.next = 'LD_RD'
+                with m.Elif(resp.valid):
+                    with m.If(split):
+                        m.d.sync += [
+                            val.eq(Cat(part, resp.data[0:8])),
+                            ph2.eq(0),
+                        ]
+                    with m.Elif(s):
                         m.d.sync += val.eq(
                             Cat(byte, Mux(sx, byte[7], 0).replicate(8))
                         )
@@ -929,14 +962,41 @@ class CPU(Component):
                     req.we.eq(1),
                     req.byte_hi.eq(byte_hi),
                     req.byte_lo.eq(byte_lo),
-                    req.addr.eq(ea[1:]),
+                    req.addr.eq(waddr),
                     req.wdata.eq(swap_wdata),
                     self.mem_lock.eq(1),
                 ]
                 with m.If(self.mem_fault):
-                    mem_refused()
+                    with m.If(split & ph2):
+                        # the first byte is written already: put the old
+                        # one back before the instruction is abandoned
+                        note_fault(ID_FAULT | FAULT_MEM, Cat(C(0, 1), req.addr))
+                        m.next = 'SWAP_UNDO'
+                    with m.Else():
+                        mem_refused()
                 with m.Elif(req.ready):
-                    m.next = 'LD_DELIVER'
+                    with m.If(split & ~ph2):
+                        m.d.sync += ph2.eq(1)
+                    with m.Else():
+                        m.d.sync += ph2.eq(0)
+                        m.next = 'LD_DELIVER'
+
+            # an odd SWAP whose second write was refused: the old first byte
+            # goes back (the page was written a moment ago, so this does not
+            # fault; if it does, it is tried again), then the abort
+            with m.State('SWAP_UNDO'):
+                data_space()
+                m.d.comb += [
+                    req.valid.eq(1),
+                    req.we.eq(1),
+                    req.byte_hi.eq(1),
+                    req.byte_lo.eq(0),
+                    req.addr.eq(ea[1:]),
+                    req.wdata.eq(Cat(C(0, 8), part)),
+                    self.mem_lock.eq(1),
+                ]
+                with m.If(~self.mem_fault & req.ready):
+                    abort()
 
             # ---- LD: put the value on the stack ----
             with m.State('LD_DELIVER'):
@@ -1347,7 +1407,7 @@ class CPU(Component):
                     req.we.eq(1),
                     req.byte_hi.eq(byte_hi),
                     req.byte_lo.eq(byte_lo),
-                    req.addr.eq(ea[1:]),
+                    req.addr.eq(waddr),
                     req.wdata.eq(wdata),
                 ]
                 with m.If(self.mem_fault):
@@ -1356,8 +1416,11 @@ class CPU(Component):
                     with m.Else():
                         mem_refused()
                 with m.Elif(req.ready):
-                    m.d.sync += midx.eq(midx_next)
-                    m.next = 'FETCH'
+                    with m.If(split & ~ph2):
+                        m.d.sync += ph2.eq(1)
+                    with m.Else():
+                        m.d.sync += midx.eq(midx_next)
+                        m.next = 'FETCH'
 
             # ---- abandoning an instruction ----
             # ST and CALL pop the stack before their last access. Put the
