@@ -32,6 +32,13 @@ Return stack is used only for backing up IP and PSP between `CALL` and `RET`.
 | MBP, MIDX     | memory base and index: `[mbp+midx]`                 | 0               |
 | SR            | status: bit 0 C, 1 Z, 2 N, 3 V, 4 P (even parity)   | 0               |
 
+### Memory Model
+
+**Stackette**'s memory is byte- and word-addressed. Stacks are word-aligned,
+but otherwise memory access is free-form. Unaligned word access results in two
+consecutive byte accesses, similar to x86 (and unlike PDP-11 or MIPS, that
+generate special exceptions).
+
 ### Memory Management Unit
 
 MMU is tightly coupled with the other elements of **Stackette**'s architecture.
