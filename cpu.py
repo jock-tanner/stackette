@@ -1580,8 +1580,10 @@ class CPUTop(Elaboratable):
         from amaranth.build import Pins, Resource
 
         from de0nano_sdram import DE0NanoSDRAM
+        from de0nano_spi_ethernet import DE0NanoSPIEtherPins
         from de0nano_spi_flash import DE0NanoSPIFlash
         from system import System
+        from spi_pins import SPIPins
         from uart import UART
 
         m = Module()
@@ -1594,6 +1596,10 @@ class CPUTop(Elaboratable):
         connect(m, flash.bus, system.flash)
         connect(m, sdram.bus, system.ram)
         connect(m, uart.bus, system.uart)
+        m.submodules.spi = spi = SPIPins()
+        m.submodules.ether = ether = DE0NanoSPIEtherPins()
+        connect(m, spi.bus, system.spi)
+        connect(m, spi.pins, ether.spi)
         m.d.comb += system.irq_ext.eq(uart.rx_avail)
 
         # UART pins hookup
