@@ -1,4 +1,5 @@
 amaranth[builtin-yosys]
 amaranth-boards
 pytest-amaranth-sim
+pytest-xdist
 pyserial

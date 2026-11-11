@@ -20,3 +20,24 @@ board (with some impromptu hardware additions) in
 [Amaranth HDL](https://amaranth-lang.org/) with
 [Quartus](https://www.altera.com/products/software-tools/quartus-prime)
 toolchain.
+
+### Building
+
+You need a decently modern Python, probably 3.10 or later.
+
+```shell
+$> pip install -r requirements.txt
+$> python cpu.py
+```
+
+`flashtool` folder contains necessary tools to write binaries to an MX25L8005
+or compatible SPI Flash memory. Alternatively, you can use any capable ROM
+programmer.
+
+Consult the [docs](docs) on how to connect the peripherals to the board.
+
+### Testing
+
+```shell
+$> pytest -n auto --dist worksteal .
+```
