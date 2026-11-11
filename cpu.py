@@ -1583,7 +1583,7 @@ class CPUTop(Elaboratable):
         from de0nano_spi_ethernet import DE0NanoSPIEtherPins
         from de0nano_spi_flash import DE0NanoSPIFlash
         from system import System
-        from spi_pins import SPIPins
+        from spi_master import SPIMaster
         from uart import UART
 
         m = Module()
@@ -1596,11 +1596,11 @@ class CPUTop(Elaboratable):
         connect(m, flash.bus, system.flash)
         connect(m, sdram.bus, system.ram)
         connect(m, uart.bus, system.uart)
-        m.submodules.spi = spi = SPIPins()
+        m.submodules.spi = spi = SPIMaster()
         m.submodules.ether = ether = DE0NanoSPIEtherPins()
         connect(m, spi.bus, system.spi)
         connect(m, spi.pins, ether.spi)
-        m.d.comb += system.irq_ext.eq(uart.rx_avail)
+        m.d.comb += system.irq_ext.eq(Cat(uart.rx_avail, spi.irq))
 
         # UART pins hookup
         platform.add_resources([

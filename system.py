@@ -8,7 +8,7 @@ memories and the UART stay outside:
     flash   serial flash reader, physical word addresses, read only
     ram     SDRAM controller
     uart    the UART's register port
-    spi     the register of the SPI pins
+    spi     the register port of the SPI master
 
 cpu.CPUTop connects the real ones; tests connect behavioral models.
 
@@ -39,7 +39,7 @@ from memory_select import CPU_ADDR_WIDTH, MemorySelect, Space
 from mmu import MMU
 from periph_bus import PERIPH_ADDR_WIDTH, PeriphBus
 from sdram_controller import HOST_ADDR_WIDTH
-from spi_pins import SPI_ADDR_WIDTH
+from spi_master import SPI_ADDR_WIDTH
 from spi_flash import FLASH_ADDR_WIDTH
 from timer import Timer
 from uart import UART_ADDR_WIDTH

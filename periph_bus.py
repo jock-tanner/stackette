@@ -9,7 +9,7 @@ addresses, 8 bits wide, so the devices repeat every 512 bytes):
     0xf008..0xf00f   interrupt controller (4 words, see intc.py)
     0xf010..0xf01f   timer (8 words, see timer.py)
     0xf020..0xf03f   context device (16 words, see context_device.py)
-    0xf040..0xf047   SPI pins (4 words, see spi_pins.py)
+    0xf040..0xf047   SPI master (4 words, see spi_master.py)
     0xf100..0xf1ff   MMU registers (128 words, see mmu.py)
 
 The rest is not mapped: a read gives 0 and a write is dropped.
@@ -27,7 +27,7 @@ from amaranth.lib.wiring import Component, In, Out
 from intc import INTC_ADDR_WIDTH
 from memory_port import MemoryPort
 from mmu import REG_ADDR_WIDTH
-from spi_pins import SPI_ADDR_WIDTH
+from spi_master import SPI_ADDR_WIDTH
 from timer import TIMER_ADDR_WIDTH
 from uart import UART_ADDR_WIDTH
 
