@@ -315,7 +315,8 @@ class SystemModel(Ref):
             self.spi_div = v & 0xff
 
     def lines(self):
-        return self.timer['match'] | (1 if self.uart_in else 0) << 1
+        return (self.timer['match'] | (1 if self.uart_in else 0) << 1
+                | (4 if self.spi_dev and not self.spi_dev.int else 0))
 
     def clock(self, n):
         t = self.timer

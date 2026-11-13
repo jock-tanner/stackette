@@ -24,6 +24,13 @@ MICMD, MIREGADR, MIRDL, MIRDH, MISTAT = 0x12, 0x14, 0x18, 0x19, 0x0a
 EREVID = 0x12
 ERDPTL, ERDPTH, EWRPTL, EWRPTH = 0x00, 0x01, 0x02, 0x03   # bank 0
 BUF_SIZE = 0x2000
+EIE, EIR = 0x1b, 0x1c
+ETXSTL, ETXNDL, ERXSTL, ERXNDL, ERXRDPTL = 0x04, 0x06, 0x08, 0x0a, 0x0c
+EPKTCNT = 0x19
+PKTIF, TXIF, RXERIF = 0x40, 0x08, 0x01
+INTIE, PKTIE, TXIE, RXERIE = 0x80, 0x40, 0x08, 0x01
+RXEN, TXRTS = 0x04, 0x08
+PKTDEC = 0x40
 
 
 class ENC28J60:
@@ -41,6 +48,8 @@ class ENC28J60:
         self.miso = idle_miso
         self.cs_n, self.sclk = 1, 0
         self.log = []               # the commands that were completed
+        self.tx_frames = []         # the frames that were sent (TXRTS)
+        self.rx_dropped = 0         # the frames that did not fit
         self.buf = bytearray(BUF_SIZE)
         self.reset()
         self.clkrdy = 1             # a power-up is not a reset: ready
@@ -48,7 +57,12 @@ class ENC28J60:
     def reset(self):
         self.regs = {(b, a): 0 for b in range(4) for a in range(32)}
         self.regs[(0, ECON1)] = 0
+        self.regs[(0, ECON2)] = 0x80
+        self.regs[(0, ERXNDL)] = 0xff
+        self.regs[(0, ERXNDL + 1)] = 0x1f
+        self.rx_wr = 0              # where the next received frame goes
         self.clkrdy = 0
+        self.int = 1
         self.estat_reads = 0
         self.busy = 0
         self.mirdata = 0
@@ -64,6 +78,9 @@ class ENC28J60:
             if self.estat_reads > self.clkrdy_reads:
                 self.clkrdy = 1
             return self.clkrdy
+        if a == EIR:
+            v = self.regs[(0, EIR)] & ~PKTIF
+            return v | (PKTIF if self.regs[(1, EPKTCNT)] else 0)
         if bank == 3 and a == MISTAT:
             if self.busy > 0:
                 self.busy -= 1
@@ -83,11 +100,74 @@ class ENC28J60:
             v = old | v
         elif op == 'bfc':
             v = old & ~v
+        if a == ECON2 and op == 'bfs' and v & PKTDEC:
+            # PKTDEC does not stay: it takes a packet off the count
+            v &= ~PKTDEC
+            if self.regs[(1, EPKTCNT)]:
+                self.regs[(1, EPKTCNT)] -= 1
         self.regs[(bank, a)] = v & 0xff
+        if a == ECON1 and v & TXRTS:
+            self.transmit()
+        if bank == 0 and a in (ERXSTL, ERXSTL + 1):
+            self.rx_wr = self.pointer(ERXSTL)
+        self.update_int()
         if bank == 2 and a == MICMD and v & 1:
             # MIIRD: the PHY register is in MIRD after the busy time
             self.mirdata = self.phy.get(self.regs[(2, MIREGADR)] & 0x1f, 0)
             self.busy = self.busy_reads
+
+    def update_int(self):
+        """INT is low while an enabled flag is up (EIE.INTIE is the master)."""
+        eir = self.read_reg_raw_eir()
+        eie = self.regs[(0, EIE)]
+        up = eir & eie & (PKTIE | TXIE | RXERIE | 0x02 | 0x10 | 0x20)
+        self.int = 0 if (eie & INTIE and up) else 1
+
+    def read_reg_raw_eir(self):
+        return self.regs[(0, EIR)] | (PKTIF if self.regs[(1, EPKTCNT)] else 0)
+
+    def transmit(self):
+        """ECON1.TXRTS: the frame in ETXST..ETXND (the first byte is the
+        per-packet control byte) goes out; TXRTS drops and TXIF comes up."""
+        st = self.pointer(ETXSTL)
+        nd = self.pointer(ETXNDL)
+        frame = bytes(self.buf[st + 1:nd + 1])
+        self.tx_frames.append(frame)
+        self.regs[(0, ECON1)] &= ~TXRTS
+        self.regs[(0, EIR)] |= TXIF
+        self.log.append(('tx', len(frame)))
+
+    def inject(self, frame):
+        """A frame arrives from the wire (the CRC is added here)."""
+        if not self.regs[(0, ECON1)] & RXEN or self.regs[(1, EPKTCNT)] >= 255:
+            return False
+        st = self.pointer(ERXSTL)
+        nd = self.pointer(ERXNDL)
+        size = nd - st + 1
+        data = bytes(frame) + b'\0\0\0\0'
+        total = 6 + len(data)
+        total += total & 1
+        rd = self.pointer(ERXRDPTL)
+        free = (rd - self.rx_wr) % size       # the free bytes of the ring
+        if total > free:
+            self.regs[(0, EIR)] |= RXERIF
+            self.rx_dropped += 1
+            self.update_int()
+            return False
+        nxt = st + (self.rx_wr - st + total) % size
+        hdr = bytes([nxt & 0xff, nxt >> 8, len(data) & 0xff, len(data) >> 8,
+                     0x80, 0x00]) + data
+        hdr += b'\0' * (total - len(hdr))
+        p = self.rx_wr
+        for b in hdr:
+            self.buf[p] = b
+            p += 1
+            if p > nd:
+                p = st
+        self.rx_wr = nxt
+        self.regs[(1, EPKTCNT)] += 1
+        self.update_int()
+        return True
 
     def pointer(self, lo):
         return self.regs[(0, lo)] | self.regs[(0, lo + 1)] << 8
@@ -98,7 +178,11 @@ class ENC28J60:
 
     def rbm(self):
         p = self.pointer(ERDPTL) % BUF_SIZE
-        self.set_pointer(ERDPTL, (p + 1) % BUF_SIZE)
+        # in the ring of the receiver the pointer wraps from ERXND to ERXST
+        nxt = (p + 1) % BUF_SIZE
+        if p == self.pointer(ERXNDL):
+            nxt = self.pointer(ERXSTL)
+        self.set_pointer(ERDPTL, nxt)
         return self.buf[p]
 
     def wbm(self, byte):
