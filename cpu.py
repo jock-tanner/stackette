@@ -1579,9 +1579,11 @@ class CPUTop(Elaboratable):
     def elaborate(self, platform):
         from amaranth.build import Pins, Resource
 
+        from de0nano_ide import DE0NanoIDEPins
         from de0nano_sdram import DE0NanoSDRAM
         from de0nano_spi_ethernet import DE0NanoSPIEtherPins
         from de0nano_spi_flash import DE0NanoSPIFlash
+        from ide_pio import IDEPio
         from system import System
         from spi_master import SPIMaster
         from uart import UART
@@ -1600,7 +1602,11 @@ class CPUTop(Elaboratable):
         m.submodules.ether = ether = DE0NanoSPIEtherPins()
         connect(m, spi.bus, system.spi)
         connect(m, spi.pins, ether.spi)
-        m.d.comb += system.irq_ext.eq(Cat(uart.rx_avail, spi.irq))
+        m.submodules.ide = ide = IDEPio()
+        m.submodules.cf = cf = DE0NanoIDEPins()
+        connect(m, ide.bus, system.ide)
+        connect(m, ide.pins, cf.ide)
+        m.d.comb += system.irq_ext.eq(Cat(uart.rx_avail, spi.irq, ide.irq))
 
         # UART pins hookup
         platform.add_resources([

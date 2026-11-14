@@ -75,6 +75,11 @@ class SystemModel(Ref):
         self.spi_cs = 0
         self.spi_div = 1
         self.spi_result = 0
+        self.ide_dev = None     # the card on the IDE host, see ide_model
+        self.ide_timing = [5, 16, 8]
+        self.ide_timeout = 0
+        self.ide_reset = 0
+        self.ide_bb = [0, 0]
         self.skipping = False
         self.istart = 0
         self.steps = 0
@@ -237,6 +242,8 @@ class SystemModel(Ref):
             return (self.id, self.fault_ip, self.fault_addr)[k - 7] if k < 10 else 0
         if 0x040 <= off < 0x048:
             return self.spi_rd(off)
+        if 0x080 <= off < 0x0c0:
+            return self.ide_rd((off - 0x080) >> 1)
         if 0x100 <= off < 0x200:
             return self.mmu[(off - 0x100) >> 1]
         return 0
@@ -268,6 +275,8 @@ class SystemModel(Ref):
                 self.saved[n] = v & (0x1f if n == 'sw' else 0xffff)
         elif 0x040 <= off < 0x048:
             self.spi_wr(off, v, byte)
+        elif 0x080 <= off < 0x0c0:
+            self.ide_wr((off - 0x080) >> 1, v)
         elif 0x100 <= off < 0x200:
             self.mmu[(off - 0x100) >> 1] = v & 0xffff
 
@@ -314,9 +323,52 @@ class SystemModel(Ref):
         elif off == 0x044:
             self.spi_div = v & 0xff
 
+    # the IDE host (ide_pio.py): a cycle on the bus is done at once, and the
+    # timer is clocked for the time that it takes
+
+    def ide_rd(self, reg):
+        dev = self.ide_dev
+        if 8 <= reg < 12:
+            if reg < 11:
+                return self.ide_timing[reg - 8]
+            return (1 if dev and dev.intrq_level else 0) | self.ide_timeout << 1 | 4
+        if reg == 12:
+            return self.ide_reset
+        if 16 <= reg < 20:
+            return self.ide_bb_rd(reg - 16)
+        if not dev or reg == 13 or reg >= 16:
+            return 0
+        self.clock(sum(self.ide_timing) + 2)
+        v = dev.read(reg >= 8, reg & 7)
+        return v if reg == 0 else v & 0xff
+
+    def ide_bb_rd(self, i):
+        # the pins by hand: DD is what is driven, or what the pull-ups say
+        if i < 2:
+            return self.ide_bb[i]
+        if i == 2:
+            return self.ide_bb[1] if self.ide_bb[0] & 0x100 else 0x0080
+        return 0b10
+
+    def ide_wr(self, reg, v):
+        dev = self.ide_dev
+        if 8 <= reg < 12:
+            if reg < 11:
+                self.ide_timing[reg - 8] = v & 0xff
+            else:
+                self.ide_timeout = 0
+        elif reg == 12:
+            self.ide_reset = v & 1
+        elif 16 <= reg < 18:
+            self.ide_bb[reg - 16] = v & (0x3ff if reg == 16 else 0xffff)
+        elif dev and reg != 13 and reg < 16:
+            self.clock(sum(self.ide_timing) + 2)
+            dev.write(reg >= 8, reg & 7, v if reg == 0 else v & 0xff)
+
     def lines(self):
         return (self.timer['match'] | (1 if self.uart_in else 0) << 1
-                | (4 if self.spi_dev and not self.spi_dev.int else 0))
+                | (4 if self.spi_dev and not self.spi_dev.int else 0)
+                | (8 if self.ide_dev and self.ide_dev.intrq_level else 0))
 
     def clock(self, n):
         t = self.timer

@@ -10,6 +10,7 @@ addresses, 8 bits wide, so the devices repeat every 512 bytes):
     0xf010..0xf01f   timer (8 words, see timer.py)
     0xf020..0xf03f   context device (16 words, see context_device.py)
     0xf040..0xf047   SPI master (4 words, see spi_master.py)
+    0xf080..0xf0bf   IDE host (32 words, see ide_pio.py)
     0xf100..0xf1ff   MMU registers (128 words, see mmu.py)
 
 The rest is not mapped: a read gives 0 and a write is dropped.
@@ -24,6 +25,7 @@ from operator import or_
 from amaranth import Module, Signal
 from amaranth.lib.wiring import Component, In, Out
 
+from ide_pio import IDE_ADDR_WIDTH
 from intc import INTC_ADDR_WIDTH
 from memory_port import MemoryPort
 from mmu import REG_ADDR_WIDTH
@@ -42,6 +44,7 @@ class PeriphBus(Component):
     timer: Out(MemoryPort(TIMER_ADDR_WIDTH))
     ctx: Out(MemoryPort(CTX_ADDR_WIDTH))
     spi: Out(MemoryPort(SPI_ADDR_WIDTH))
+    ide: Out(MemoryPort(IDE_ADDR_WIDTH))
     mmu: Out(MemoryPort(REG_ADDR_WIDTH))
 
     def elaborate(self, platform):
@@ -53,6 +56,7 @@ class PeriphBus(Component):
         sel_timer = Signal()
         sel_ctx = Signal()
         sel_spi = Signal()
+        sel_ide = Signal()
         sel_mmu = Signal()
         m.d.comb += [
             sel_uart.eq(req.addr[2:] == 0),
@@ -60,10 +64,12 @@ class PeriphBus(Component):
             sel_timer.eq(req.addr[3:] == 1),
             sel_ctx.eq(req.addr[4:] == 1),
             sel_spi.eq(req.addr[2:] == 8),
+            sel_ide.eq(req.addr[5:] == 2),
             sel_mmu.eq(req.addr[7:] == 1),
         ]
         unmapped = ~(
-            sel_uart | sel_intc | sel_timer | sel_ctx | sel_spi | sel_mmu
+            sel_uart | sel_intc | sel_timer | sel_ctx | sel_spi | sel_ide
+            | sel_mmu
         )
 
         targets = (
@@ -72,6 +78,7 @@ class PeriphBus(Component):
             (self.timer, sel_timer),
             (self.ctx, sel_ctx),
             (self.spi, sel_spi),
+            (self.ide, sel_ide),
             (self.mmu, sel_mmu),
         )
         for target, sel in targets:
@@ -91,6 +98,7 @@ class PeriphBus(Component):
             | (sel_timer & self.timer.req.ready)
             | (sel_ctx & self.ctx.req.ready)
             | (sel_spi & self.spi.req.ready)
+            | (sel_ide & self.ide.req.ready)
             | (sel_mmu & self.mmu.req.ready)
         )
 

@@ -9,6 +9,7 @@ memories and the UART stay outside:
     ram     SDRAM controller
     uart    the UART's register port
     spi     the register port of the SPI master
+    ide     the register port of the IDE host (ide_pio.py)
 
 cpu.CPUTop connects the real ones; tests connect behavioral models.
 
@@ -37,6 +38,7 @@ from memory_arbiter import MemoryArbiter
 from memory_port import MemoryPort
 from memory_select import CPU_ADDR_WIDTH, MemorySelect, Space
 from mmu import MMU
+from ide_pio import IDE_ADDR_WIDTH
 from periph_bus import PERIPH_ADDR_WIDTH, PeriphBus
 from sdram_controller import HOST_ADDR_WIDTH
 from spi_master import SPI_ADDR_WIDTH
@@ -50,6 +52,7 @@ class System(wiring.Component):
     ram: Out(MemoryPort(HOST_ADDR_WIDTH))
     uart: Out(MemoryPort(UART_ADDR_WIDTH))
     spi: Out(MemoryPort(SPI_ADDR_WIDTH))
+    ide: Out(MemoryPort(IDE_ADDR_WIDTH))
     # interrupt lines of devices outside (line 1 and up; line 0 is the timer)
     irq_ext: In(N_LINES - 1)
 
@@ -101,6 +104,7 @@ class System(wiring.Component):
         connect(m, sel.periph, periph.bus)
         connect(m, flipped(self.uart), periph.uart)
         connect(m, flipped(self.spi), periph.spi)
+        connect(m, flipped(self.ide), periph.ide)
         connect(m, periph.intc, intc.bus)
         connect(m, periph.timer, timer.bus)
         connect(m, periph.ctx, ctx_dev.bus)
