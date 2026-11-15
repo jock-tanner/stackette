@@ -28,14 +28,12 @@ OP_LEA = 11
 OP_CMP = 12
 OP_TST = 13
 U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC = range(6)
-REG_TOS = 0
-REG_NOS = 1
+REG_NULL = 0
+REG_SP = 1
 REG_MBP = 2
 REG_MIDX = 3
-REG_SP = 4
-REG_NULL = 5
 REG_SR = 6
-REG_IP = 15
+REG_IP = 7
 SR_MASK = 0x1f
 
 
@@ -93,7 +91,7 @@ def gen_operand(w):
     """
     The operand field of a GENERAL format instruction (its low 7 bits):
     (logical mode, x, e), or None if there is no such operand.
-        000 rrrr    register r
+        000 0rrr    register r: 0 NULL, 1 PSP, 2 MBP, 3 MIDX, 6 SR, 7 IP
         001 0 mm e  mm: 0 [mbp+midx], 1 [mbp+midx++], 2 [mbp+--midx],
                     3 [tos]
         01 0000 e   [abs16]
@@ -530,8 +528,6 @@ class Ref:
         mode, x, e = gen_operand(w)
         if mode == 0:
             regs = {
-                REG_TOS: self.item(0),
-                REG_NOS: self.item(1),
                 REG_MBP: self.mbp,
                 REG_MIDX: self.midx,
                 REG_SP: self.psp,
@@ -600,11 +596,7 @@ class Ref:
         mode, x, _ = gen_operand(w)
         if mode == 0:
             v8 = v & 0xff if s else v
-            if x == REG_TOS:
-                self.wr16(self.psp, v8)
-            elif x == REG_NOS:
-                self.wr16(self.psp + 2, v8)
-            elif x == REG_MBP:
+            if x == REG_MBP:
                 self.mbp = v8
             elif x == REG_MIDX:
                 self.midx = v8
@@ -726,10 +718,6 @@ class Program:
             return i_imm8(op, dd, r.getrandbits(8))
         if kind == 'reg':
             regs = [REG_MBP, REG_MIDX, REG_SP, REG_NULL, REG_SR, REG_IP]
-            if d >= 1:
-                regs.append(REG_TOS)
-            if d >= 2:
-                regs.append(REG_NOS)
             return i_gen(op, dd, s, 0, r.choice(regs))
         if kind == 'imm16':
             return i_gen(op, dd, s, 4, 0, r.getrandbits(16))
@@ -910,9 +898,7 @@ class Program:
         s = r.getrandbits(1)
         kinds = ['pfp', 'ptr', 'abs', 'null', 'sr']
         if d >= 1:
-            kinds += ['tos', 'sp']
-        if d >= 2:
-            kinds.append('nos')
+            kinds.append('sp')
         kind = r.choice(kinds)
         if kind == 'pfp' and self.pfp_store(d) is None:
             kind = 'null'
@@ -920,10 +906,6 @@ class Program:
             ins = i_gen(OP_ST, dd, s, 0, REG_NULL)
         elif kind == 'sr':
             ins = i_gen(OP_ST, dd, s, 0, REG_SR)
-        elif kind == 'tos':
-            ins = i_gen(OP_ST, dd, s, 0, REG_TOS)
-        elif kind == 'nos':
-            ins = i_gen(OP_ST, dd, s, 0, REG_NOS)
         elif kind == 'pfp':
             ins = i_pfp(OP_ST, dd, s, self.pfp_store(d))
         elif kind == 'ptr':

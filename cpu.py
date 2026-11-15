@@ -32,14 +32,12 @@ OP_TST = 0b1101
 FMT_IMM8 = 0
 FMT_PFP = 1
 FMT_GEN = 2
-REG_TOS = 0
-REG_NOS = 1
+REG_NULL = 0
+REG_SP = 1
 REG_MBP = 2
 REG_MIDX = 3
-REG_SP = 4
-REG_NULL = 5
 REG_SR = 6
-REG_IP = 15
+REG_IP = 7
 
 # the status register bits that exist: C Z N V P. The others read as zero
 # and ignore writes.
@@ -295,7 +293,9 @@ class CPU(Component):
         is_nop = is_misc & (misc_op == MISC_NOP) & (instr[0:6] == 0)
         is_call_direct = is_call_rel | is_call_abs
         op_field = instr[0:7]
+        # registers: 000 0rrr, the codes 4 and 5 and those from 8 are reserved
         reg_mode = is_gen & (op_field[4:7] == 0b000)
+        reg_ok = reg_mode & ~op_field[3] & (~op_field[2] | op_field[1])
         ptr_group = is_gen & (op_field[3:7] == 0b0010)
         ptr_kind = op_field[1:3]
         ptr_mode = ptr_group & (ptr_kind != 3)
@@ -315,7 +315,7 @@ class CPU(Component):
         )
         # the operands that exist: an item of the stack has no sign flag
         gen_ok = (
-                reg_mode | ptr_group | abs_mode | imm16_mode
+                reg_ok | ptr_group | abs_mode | imm16_mode
                 | (sp_mode & ~(sp_stack & e))
         )
         ok_ld = is_ld & (~is_gen | gen_ok)
@@ -408,10 +408,6 @@ class CPU(Component):
 
         reg_val = Signal(16)
         with m.Switch(x):
-            with m.Case(REG_TOS):
-                m.d.comb += reg_val.eq(stack.d0)
-            with m.Case(REG_NOS):
-                m.d.comb += reg_val.eq(stack.d1)
             with m.Case(REG_MBP):
                 m.d.comb += reg_val.eq(mbp)
             with m.Case(REG_MIDX):
@@ -441,11 +437,7 @@ class CPU(Component):
 
         # which stack item the source reads
         ld_need = Signal(4)
-        with m.If(reg_mode & (x == REG_TOS)):
-            m.d.comb += ld_need.eq(0b0001)
-        with m.Elif(reg_mode & (x == REG_NOS)):
-            m.d.comb += ld_need.eq(0b0010)
-        with m.Elif(sp_stack):
+        with m.If(sp_stack):
             m.d.comb += ld_need.eq(sp_need)
 
         src_raw = Signal(16)
@@ -503,7 +495,7 @@ class CPU(Component):
         st_item = Signal(16)
         st_need = Signal(4)
         m.d.comb += [
-            st_pos.eq(Mux(reg_mode, x[0], sp_k[0:2])),
+            st_pos.eq(sp_k[0:2]),
             st_item.eq(lines[st_pos]),
             st_need.eq(need_of(st_pos)),
         ]
@@ -1382,8 +1374,6 @@ class CPU(Component):
             with m.State('ST_DEST'):
                 with m.If(reg_mode):
                     with m.Switch(x):
-                        with m.Case(REG_TOS, REG_NOS):
-                            m.next = 'ST_STK'
                         with m.Case(REG_MBP):
                             m.d.sync += mbp.eq(val_sz)
                             m.next = 'FETCH'

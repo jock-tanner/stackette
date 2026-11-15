@@ -117,7 +117,8 @@ add adc sub sbc and zero-extended for and or xor bic.
 Operands (st takes no immediate):
     #expr               immediate: imm8 if it is a number in -128..127, else
                         imm16 (a label is always imm16); ld only
-    tos nos mbp midx sp null sr ip  register (sr: the status register, see below)
+    tos nos             the stack items, the same as [sp+0] and [sp+1]
+    mbp midx sp null sr ip  register (sp or psp, sr: the status register, see below)
     [mbp+midx]  [mbp+midx++]  [mbp+--midx]      pointer, post-increment, pre-decrement
     [expr]              absolute 16-bit byte address
     [sp+k]              stack item k (0 = TOS), k = 0..31
@@ -129,7 +130,9 @@ import argparse
 import re
 import sys
 
-REGS = {'tos': 0, 'nos': 1, 'mbp': 2, 'midx': 3, 'sp': 4, 'null': 5, 'sr': 6, 'ip': 15}
+REGS = {'null': 0, 'sp': 1, 'psp': 1, 'mbp': 2, 'midx': 3, 'sr': 6, 'ip': 7}
+# tos and nos as operands are the stack items [sp+0] and [sp+1]
+STACK_ITEMS = {'tos': '0', 'nos': '1'}
 LD_DD = {'tos': 0, 'nos': 1, 'push': 2, 'under': 3}
 ST_DD = {'tos': 0, 'nos': 1, 'pop': 2, 'under': 3}
 ALU_OPS = ['add', 'adc', 'sub', 'sbc', 'and', 'or', 'xor', 'bic']
@@ -199,6 +202,8 @@ def parse_operand(text):
     t = text.strip()
     if t.startswith('#'):
         return ('imm', t[1:].strip())
+    if t.lower() in STACK_ITEMS:
+        return ('sp', STACK_ITEMS[t.lower()])
     if t.lower() in REGS:
         return ('reg', REGS[t.lower()])
     if t.startswith('[') and t.endswith(']'):
@@ -230,7 +235,7 @@ def w_pfp(op, dd, s, f):
 
 # the operand field of the GENERAL format, its low 7 bits (`e` makes a byte
 # load sign-extending):
-#   000 rrrr    register r
+#   000 0rrr    register r: 0 null, 1 sp, 2 mbp, 3 midx, 6 sr, 7 ip
 #   001 0 mm e  mm: 0 [mbp+midx], 1 [mbp+midx++], 2 [mbp+--midx], 3 [tos]
 #   01 0000 e   [abs16]
 #   01 0001 0   #imm16
