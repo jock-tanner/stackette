@@ -5,6 +5,7 @@ from alu import ALU, OpCodes
 from memory_port import MemoryPort
 from muldiv import MulDiv
 from memory_select import CPU_ADDR_WIDTH, Space
+from shifter import DualWidthBarrelShifter16, ShiftOp
 from stack_cache import Maint, Shift, StackCache
 
 # Initial pointer values from the memory map, for the CPU reset logic.
@@ -51,8 +52,6 @@ UOP_SXT = 2
 UOP_BSWAP = 3
 UOP_RLC = 4
 UOP_RRC = 5
-UOP_SHR = 6
-UOP_SAR = 7
 MISC_NOP = 0
 MISC_RET_N = 1
 MISC_RETI = 2
@@ -259,6 +258,20 @@ class CPU(Component):
         is_unary = is_ctl & (grp == 2) & (instr[10:12] == 0)
         u_op = instr[3:7]
 
+        # shifts by a count: 11 10 10 kk s v dd cccc. `kk` is the kind (0 SHL,
+        # 1 SHR, 2 SAR), `s` bytes, `v` takes the count from TOS instead of
+        # `cccc`. With an immediate count the item shifted in place is TOS
+        # (`dd` 0) or NOS (`dd` 1). With the count in TOS the item is NOS, the
+        # result replaces it and TOS is dropped (`dd` 0).
+        is_shift = (
+                is_ctl & (grp == 2) & (instr[10:12] == 2) & (instr[8:10] != 3)
+        )
+        sh_kind = instr[8:10]
+        sh_var = instr[6]
+        sh_pos = Signal(2)
+        m.d.comb += sh_pos.eq(Mux(sh_var, 1, instr[4]))
+        ok_shift = is_shift & ~instr[5] & ~(sh_var & instr[4])
+
         # multiplication and division: 11 10 01 d g s 0000000, `d` selects
         # division, `g` signed numbers and `s` bytes
         is_muldiv = (
@@ -321,7 +334,7 @@ class CPU(Component):
 
         # SXT and BSWAP are word operations
         ok_unary = (
-                is_unary & (u_op < 8)
+                is_unary & (u_op < 6)
                 & ~(s & ((u_op == UOP_SXT) | (u_op == UOP_BSWAP)))
         )
         ok_ctl = (
@@ -330,7 +343,7 @@ class CPU(Component):
                 | is_call_abs | is_jmp_abs | is_call_pop
                 # RETI is an illegal instruction in user mode
                 | (is_reti & ~user) | is_trap
-                | is_muldiv | is_nop
+                | is_muldiv | is_nop | ok_shift
         )
         ok = ok_ld | ok_st | ok_alu | ok_swap | ok_lea | ok_ctl
 
@@ -559,6 +572,23 @@ class CPU(Component):
         # A byte result is zero-extended into the destination word.
         m.submodules.alu = alu = ALU()
         m.submodules.muldiv = md = MulDiv()
+        m.submodules.shifter = sh = DualWidthBarrelShifter16()
+        # the shifter: the item at `sh_pos`, shifted by the immediate count or
+        # by TOS
+        m.d.comb += [
+            sh.data_in.eq(lines[sh_pos]),
+            sh.shamt.eq(Mux(sh_var, stack.d0, instr[0:4])),
+            sh.size.eq(s),
+        ]
+        with m.Switch(sh_kind):
+            with m.Case(0):
+                m.d.comb += sh.op.eq(ShiftOp.SLL)
+            with m.Case(1):
+                m.d.comb += sh.op.eq(ShiftOp.SRL)
+            with m.Case(2):
+                m.d.comb += sh.op.eq(ShiftOp.SRA)
+        sh_n = Signal()
+        m.d.comb += sh_n.eq(Mux(s, sh.data_out[7], sh.data_out[15]))
         md_a = Signal(16)       # MUL, DIV: NOS
         md_b = Signal(16)       # MUL, DIV: TOS
 
@@ -568,7 +598,9 @@ class CPU(Component):
         # pop of dd 2 and the removal of dd 3 follow.
         alu_pos = Signal(2)
         m.d.comb += [
-            alu_pos.eq(Mux(is_cmp, dd[0], dd[0] ^ dd[1])),
+            alu_pos.eq(Mux(
+                is_shift, sh_pos, Mux(is_cmp, dd[0], dd[0] ^ dd[1])
+            )),
             alu.operand_a.eq(lines[alu_pos]),
             alu.size.eq(s),
             alu.carry_in.eq(sw[0]),
@@ -592,7 +624,6 @@ class CPU(Component):
             m.d.comb += [
                 set_c.eq(
                     (u_op == UOP_NEG) | (u_op == UOP_RLC) | (u_op == UOP_RRC)
-                    | (u_op == UOP_SHR) | (u_op == UOP_SAR)
                 ),
                 set_v.eq((u_op == UOP_NEG) | (u_op == UOP_RLC)),
             ]
@@ -616,10 +647,6 @@ class CPU(Component):
                     m.d.comb += alu.op_code.eq(OpCodes.ADC)
                 with m.Case(UOP_RRC):
                     m.d.comb += alu.op_code.eq(OpCodes.RRC)
-                with m.Case(UOP_SHR):
-                    m.d.comb += alu.op_code.eq(OpCodes.SHR)
-                with m.Case(UOP_SAR):
-                    m.d.comb += alu.op_code.eq(OpCodes.SAR)
         with m.Elif(is_cmp):
             m.d.comb += alu.op_code.eq(Mux(op[0], OpCodes.AND, OpCodes.SUB))
         with m.Else():
@@ -798,7 +825,7 @@ class CPU(Component):
                         m.next = 'LD_DELIVER'
                 with m.Elif(is_swap):
                     m.next = 'SWAP_TAKE'
-                with m.Elif(is_unary):
+                with m.Elif(is_unary | is_shift):
                     m.next = 'ALU_DELIVER'
                 with m.Elif(is_muldiv):
                     m.next = 'MD_TAKE'
@@ -1047,7 +1074,16 @@ class CPU(Component):
                     cmd.w0_pos.eq(alu_pos),
                     cmd.w0_data.eq(alu.result),
                 ]
-                with m.If(is_unary):
+                with m.If(is_shift):
+                    # the result replaces the item, and with the count in TOS
+                    # the count is dropped: dd 2 of the ALU
+                    m.d.comb += [
+                        cmd.need.eq(need_of(sh_pos) | Mux(sh_var, 1, 0)),
+                        cmd.w0_data.eq(sh.data_out),
+                    ]
+                    with m.If(sh_var):
+                        m.d.comb += cmd.shift.eq(Shift.POP)
+                with m.Elif(is_unary):
                     # dd 0 and 1 replace the operand, 2 and 3 keep it and
                     # push the result on top or under TOS
                     with m.Switch(dd):
@@ -1078,9 +1114,22 @@ class CPU(Component):
                         sw[2].eq(alu.sign),
                         sw[4].eq(alu.parity),
                     ]
-                    with m.If(set_c):
+                    with m.If(is_shift):
+                        # Z N P from the result; a real shift sets C and
+                        # clears V, a count of 0 leaves both
+                        m.d.sync += [
+                            sw[1].eq(sh.data_out == 0),
+                            sw[2].eq(sh_n),
+                            sw[4].eq(~sh.data_out.xor()),
+                        ]
+                        with m.If(sh.carry_upd):
+                            m.d.sync += [
+                                sw[0].eq(sh.carry_out),
+                                sw[3].eq(0),
+                            ]
+                    with m.If(set_c & ~is_shift):
                         m.d.sync += sw[0].eq(alu.carry)
-                    with m.If(set_v):
+                    with m.If(set_v & ~is_shift):
                         m.d.sync += sw[3].eq(alu.overflow)
                     m.next = 'FETCH'
 

@@ -27,7 +27,7 @@ OP_SWAP = 10
 OP_LEA = 11
 OP_CMP = 12
 OP_TST = 13
-U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC, U_SHR, U_SAR = range(8)
+U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC = range(6)
 REG_TOS = 0
 REG_NOS = 1
 REG_MBP = 2
@@ -319,6 +319,9 @@ class Ref:
         if grp == 2 and (w >> 10) & 3 == 1 and not w & 0x7f:
             self.muldiv((w >> 9) & 1, (w >> 8) & 1, (w >> 7) & 1)
             return None
+        if grp == 2 and (w >> 10) & 3 == 2 and (w >> 8) & 3 != 3:
+            self.shift(w)
+            return None
         if grp == 3 and not w & 0x800:
             return self.call(rel, next_ip)
         if grp == 3:
@@ -387,6 +390,49 @@ class Ref:
         self.wr16(self.psp, prim)
         self.wr16(self.psp + 2, sec)
 
+    def shift(self, w):
+        """
+        SHL, SHR, SAR by a count: `11 10 10 kk s v dd cccc`. With v = 0 the count is cccc and
+        the item is TOS (dd 0) or NOS (dd 1), replaced in place. With v = 1 the count is TOS
+        (the whole word, unsigned), the item is NOS and the result replaces it: TOS is dropped.
+        A count of the width or more gives 0 (SAR: the sign), C is the last bit shifted out.
+        With a count of 0 the item and C stay, V is cleared by any real shift.
+        """
+        kind = (w >> 8) & 3
+        s = (w >> 7) & 1
+        v = (w >> 6) & 1
+        dd = (w >> 4) & 3
+        bits = 8 if s else 16
+        mask = (1 << bits) - 1
+        if v:
+            count, pos = self.item(0), 1
+        else:
+            count, pos = w & 15, dd & 1
+        a = self.item(pos) & mask
+        sign = a >> (bits - 1) & 1
+        if count == 0:
+            r = a
+        else:
+            if kind == 0:
+                r = a << count & mask if count < bits else 0
+                self.c = a >> (bits - count) & 1 if count <= bits else 0
+            elif kind == 1:
+                r = a >> count if count < bits else 0
+                self.c = a >> (count - 1) & 1 if count <= bits else 0
+            else:
+                fill = mask if sign else 0
+                r = (fill << (bits - count) | a >> count) & mask if count < bits else fill
+                self.c = a >> (count - 1) & 1 if count <= bits else sign
+            self.v = 0
+        self.z = int(r == 0)
+        self.n = r >> (bits - 1) & 1
+        self.p = int(bin(r).count('1') % 2 == 0)
+        if v:
+            self.psp += 2
+            self.wr16(self.psp, r)
+        else:
+            self.wr16(self.psp + 2 * pos, r)
+
     def unary(self, op, dd, s):
         # the operand is the item the ALU ops use: TOS for dd 0 and 3,
         # NOS for 1 and 2
@@ -411,10 +457,6 @@ class Ref:
             self.v = (a >> (bits - 1) ^ r >> (bits - 1)) & 1
         elif op == U_RRC:
             r = self.c << (bits - 1) | a >> 1
-            self.c = a & 1
-        else:
-            sign = a >> (bits - 1) & 1 if op == U_SAR else 0
-            r = sign << (bits - 1) | a >> 1
             self.c = a & 1
         self.z = int(r == 0)
         self.n = r >> (bits - 1) & 1
@@ -750,7 +792,7 @@ class Program:
         if d < self.max_depth:
             dds += [3]
         dd = r.choice(dds)
-        op = r.randrange(8)
+        op = r.randrange(6)
         s = 0 if op in (U_SXT, U_BSWAP) else r.getrandbits(1)
         self.emit(i_unary(op, dd, s), 1 if dd >= 2 else 0)
         return True

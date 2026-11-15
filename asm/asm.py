@@ -63,6 +63,13 @@ Control flow:
                         shift of a long (low word TOS), `sar nos` + `rrc tos` for the
                         arithmetic one, and `add tos, tos` + `adc nos, nos` for the
                         left shift.
+    shl shr sar  tos|nos, #n    shift TOS or NOS in place by 0..15 bits
+    shl shr sar  push, tos      shift NOS by the count in TOS and drop TOS (the count is
+                        the whole word, unsigned; a count of the width (16, or 8 for .b)
+                        or more gives 0, for sar the sign). .b shifts the low byte and
+                        zero-extends. C gets the last bit shifted out (unchanged for a
+                        count of 0), V is cleared, Z N P from the result. With one operand
+                        shr and sar are the shifts by one bit above.
     mulu muls divu divs  (.b for 8 bits; no operands)
                         NOS and TOS are replaced by two results: TOS gets the
                         primary one, NOS the secondary one. mul: TOS * NOS, low part
@@ -238,10 +245,11 @@ def w_gen(op, dd, s, field, extra=None):
 
 UNARY = {
     'not': 0, 'neg': 1, 'sxt': 2, 'bswap': 3, 'rlc': 4, 'rrc': 5,
-    'shr': 6, 'sar': 7,
+    'shr': 6, 'sar': 7,  # not instructions of their own: a shift by 1
 }
 # multiplication and division take no operands: NOS and TOS are replaced by
 # the primary result (TOS) and the secondary one (NOS)
+SHIFTS = {'shl': 0, 'shr': 1, 'sar': 2}
 MULDIV = {'mulu': 0xe400, 'muls': 0xe500, 'divu': 0xe600, 'divs': 0xe700}
 CTL = ('bra', 'call', 'calla', 'jmp', 'ret', 'addp', 'skip', 'setb', 'clrb', 'reti', 'trap', 'nop')
 CONDITIONS = {
@@ -342,6 +350,20 @@ def encode(mnemonic, operands, labels, pc=0):
         if operands:
             raise AsmError(f'{name} takes no operands')
         return [MULDIV[name] | (suffix == 'b') << 7]
+    if name in SHIFTS and len(operands) == 2:
+        if suffix not in ('', 'b'):
+            raise AsmError(f'unknown size suffix .{suffix}')
+        dst, src = operands[0].lower(), operands[1]
+        if dst == 'push' and src.lower() == 'tos':
+            v, dd, n = 1, 0, 0
+        elif dst in ('tos', 'nos') and src[:1] in ('#', '$'):
+            v, dd = 0, 0 if dst == 'tos' else 1
+            n = value(src[1:], labels or {}) if labels is not None or is_number(src[1:]) else 0
+            if not 0 <= n <= 15:
+                raise AsmError(f'{name}: the count must be 0..15')
+        else:
+            raise AsmError(f'{name} takes tos|nos, #count or push, tos')
+        return [0xe800 | SHIFTS[name] << 8 | (suffix == 'b') << 7 | v << 6 | dd << 4 | n]
     if name in UNARY:
         if suffix not in ('', 'b'):
             raise AsmError(f'unknown size suffix .{suffix}')
@@ -351,6 +373,11 @@ def encode(mnemonic, operands, labels, pc=0):
         if suffix and name in ('sxt', 'bswap'):
             raise AsmError(f'{name} is a word operation')
         dd = dds[operands[0].lower()]
+        if name in ('shr', 'sar'):
+            # the shift by one is the shift by a count of 1
+            if dd > 1:
+                raise AsmError(f'{name} takes tos or nos')
+            return [0xe800 | SHIFTS[name] << 8 | (suffix == 'b') << 7 | dd << 4 | 1]
         return [0xe000 | dd << 8 | (suffix == 'b') << 7 | UNARY[name] << 3]
     if name == 'lea':
         if suffix:
