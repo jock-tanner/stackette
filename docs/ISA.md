@@ -163,24 +163,28 @@ in stack cache (`2k` < 4).
 
 ### Monadic, Control, and Various Instructions (format 11)
 
-| Instruction                     | Encoding                 | Effect                                                                                  |
-|---------------------------------|--------------------------|-----------------------------------------------------------------------------------------|
-| `BRA l`                         | `11 00 0 lllllllllll`    | branch (with 11-bit signed offset)                                                      |
-| `SKIP cc`                       | `11 00 10 cccc 000000`   | skip the next instruction (any length) if condition (`cc`) holds                        |
-| `SETB #m`                       | `11 01 0000 iiiiiiii`    | set SR bits                                                                             |
-| `CLRB #m`                       | `11 01 1000 iiiiiiii`    | clear SR bits                                                                           |
-| `ADDP MBP\|MIDX\|PSP, #i`       | `11 01 01 rr iiiiiiii`   | register (`rr`: 0 MBP, 1 MIDX, 2 PSP) += signed byte                                    |
-| `NOT\|NEG\|SXT\|BSWAP dd`       | `11 10 00 dd s oooo 000` | monadic instructions (see below)                                                        |
-| `MULU\|MULS\|DIVU\|DIVS` (`.b`) | `11 10 01 d g s 0000000` | signed/unsigned (`g`) division/subtraction (`d`) over words/bytes (`s`) on stack        |
-| `CALL l`                        | `11 11 0 lllllllllll`    | call (with 11-bit word offset)                                                          |
-| `NOP`                           | `11 11 100000 000000`    | no-op                                                                                   |
-| `RET #n`                        | `11 11 100001 iiiiii`    | return and subtract #n words from PSP                                                   |
-| `RETI`                          | `11 11 100010 000000`    | enter (return to) user mode                                                             |
-| `TRAP #p`                       | `11 11 100100 iiiiii`    | system call                                                                             |
-| `CALLA abs`                     | `11 11 100101 000000`    | call (address in next word)                                                             |
-| `JMP abs`                       | `11 11 100110 000000`    | jump (address in next word)                                                             |
-| `CALL POP`                      | `11 11 100111 000000`    | call (pop address from stack)                                                           |
-| `RET [SFP]`                     | `11 11 101001 000000`    | return and subtract the number of words, supplied by caller in last parameter, from PSP |
+| Instruction                        | Encoding                 | Effect                                                                                  |
+|------------------------------------|--------------------------|-----------------------------------------------------------------------------------------|
+| `BRA l`                            | `11 00 0 lllllllllll`    | branch (with 11-bit signed offset)                                                      |
+| `SKIP cc`                          | `11 00 10 cccc 000000`   | skip the next instruction (any length) if condition (`cc`) holds                        |
+| `SETB #m`                          | `11 01 0000 iiiiiiii`    | set SR bits                                                                             |
+| `CLRB #m`                          | `11 01 1000 iiiiiiii`    | clear SR bits                                                                           |
+| `ADDP MBP\|MIDX\|PSP, #i`          | `11 01 01 rr iiiiiiii`   | register (`rr`: 0 MBP, 1 MIDX, 2 PSP) += signed byte                                    |
+| `NOT\|NEG\|SXT\|BSWAP dd`          | `11 10 00 dd s oooo 000` | monadic instructions (see below)                                                        |
+| `MULU\|MULS\|DIVU\|DIVS` (`.b`)    | `11 10 01 d g s 0000000` | signed/unsigned (`g`) division/subtraction (`d`) over words/bytes (`s`) on stack        |
+|                                    |                          |                                                                                         |
+| `SHL`, `SHR`, `SAR`, `ROL`, `ROR`  | `11 10 10 dd s kkk cccc` |                                                                                         |
+|                                    |                          |                                                                                         |
+|                                    |                          |                                                                                         |
+| `CALL l`                           | `11 11 0 lllllllllll`    | call (with 11-bit word offset)                                                          |
+| `NOP`                              | `11 11 100000 000000`    | no-op                                                                                   |
+| `RET #n`                           | `11 11 100001 iiiiii`    | return and subtract #n words from PSP                                                   |
+| `RETI`                             | `11 11 100010 000000`    | enter (return to) user mode                                                             |
+| `TRAP #p`                          | `11 11 100100 iiiiii`    | system call                                                                             |
+| `CALLA abs`                        | `11 11 100101 000000`    | call (address in next word)                                                             |
+| `JMP abs`                          | `11 11 100110 000000`    | jump (address in next word)                                                             |
+| `CALL POP`                         | `11 11 100111 000000`    | call (pop address from stack)                                                           |
+| `RET [SFP]`                        | `11 11 101001 000000`    | return and subtract the number of words, supplied by caller in last parameter, from PSP |
 
 Monadic instructions are performed on stack destination (`dd`). `SXT`
 and `BSWAP` are word-only, other instructions have byte- and word-size

@@ -48,8 +48,6 @@ UOP_NOT = 0
 UOP_NEG = 1
 UOP_SXT = 2
 UOP_BSWAP = 3
-UOP_RLC = 4
-UOP_RRC = 5
 MISC_NOP = 0
 MISC_RET_N = 1
 MISC_RETI = 2
@@ -256,19 +254,18 @@ class CPU(Component):
         is_unary = is_ctl & (grp == 2) & (instr[10:12] == 0)
         u_op = instr[3:7]
 
-        # shifts by a count: 11 10 10 kk s v dd cccc. `kk` is the kind (0 SHL,
-        # 1 SHR, 2 SAR), `s` bytes, `v` takes the count from TOS instead of
-        # `cccc`. With an immediate count the item shifted in place is TOS
-        # (`dd` 0) or NOS (`dd` 1). With the count in TOS the item is NOS, the
-        # result replaces it and TOS is dropped (`dd` 0).
-        is_shift = (
-                is_ctl & (grp == 2) & (instr[10:12] == 2) & (instr[8:10] != 3)
+        # shifts and rotates: 11 10 1v dd s kkk cccc. `dd` and `s` are as
+        # usual and `kkk` is shifter.ShiftOp (0 SHL, 1 SHR, 2 SAR, 4 ROL,
+        # 5 ROR, 6 RCL, 7 RCR). With v = 0 the count is `cccc`, 0 for 16, and
+        # `dd` works as in the unary operations. With v = 1 (`cccc` = 0) the
+        # count is TOS and `dd` works as in the ALU operations with TOS as the
+        # source. The item is the same for both: TOS for dd 0 and 3, NOS for
+        # dd 1 and 2.
+        is_shift = is_ctl & (grp == 2) & instr[11]
+        sh_var = instr[10]
+        ok_shift = (
+                is_shift & (instr[4:7] != 3) & ~(sh_var & (instr[0:4] != 0))
         )
-        sh_kind = instr[8:10]
-        sh_var = instr[6]
-        sh_pos = Signal(2)
-        m.d.comb += sh_pos.eq(Mux(sh_var, 1, instr[4]))
-        ok_shift = is_shift & ~instr[5] & ~(sh_var & instr[4])
 
         # multiplication and division: 11 10 01 d g s 0000000, `d` selects
         # division, `g` signed numbers and `s` bytes
@@ -334,7 +331,7 @@ class CPU(Component):
 
         # SXT and BSWAP are word operations
         ok_unary = (
-                is_unary & (u_op < 6)
+                is_unary & ~u_op[2] & ~u_op[3]
                 & ~(s & ((u_op == UOP_SXT) | (u_op == UOP_BSWAP)))
         )
         ok_ctl = (
@@ -565,20 +562,16 @@ class CPU(Component):
         m.submodules.alu = alu = ALU()
         m.submodules.muldiv = md = MulDiv()
         m.submodules.shifter = sh = DualWidthBarrelShifter16()
-        # the shifter: the item at `sh_pos`, shifted by the immediate count or
-        # by TOS
+        # the shifter: the ALU item, shifted by TOS or by the immediate count
+        # (cccc, 0 for 16)
+        alu_pos = Signal(2)
         m.d.comb += [
-            sh.data_in.eq(lines[sh_pos]),
-            sh.shamt.eq(Mux(sh_var, stack.d0, instr[0:4])),
+            sh.data_in.eq(lines[alu_pos]),
+            sh.shamt.eq(Mux(sh_var, stack.d0, Cat(instr[0:4], instr[0:4] == 0))),
             sh.size.eq(s),
+            sh.carry_in.eq(sw[0]),
+            sh.op.eq(instr[4:7]),
         ]
-        with m.Switch(sh_kind):
-            with m.Case(0):
-                m.d.comb += sh.op.eq(ShiftOp.SLL)
-            with m.Case(1):
-                m.d.comb += sh.op.eq(ShiftOp.SRL)
-            with m.Case(2):
-                m.d.comb += sh.op.eq(ShiftOp.SRA)
         sh_n = Signal()
         m.d.comb += sh_n.eq(Mux(s, sh.data_out[7], sh.data_out[15]))
         md_a = Signal(16)       # MUL, DIV: NOS
@@ -588,11 +581,8 @@ class CPU(Component):
         # unary operations use the same item as their operand. CMP and TST
         # compare TOS for dd 0 and 2, NOS for dd 1 and 3, like ST, and the
         # pop of dd 2 and the removal of dd 3 follow.
-        alu_pos = Signal(2)
         m.d.comb += [
-            alu_pos.eq(Mux(
-                is_shift, sh_pos, Mux(is_cmp, dd[0], dd[0] ^ dd[1])
-            )),
+            alu_pos.eq(Mux(is_cmp, dd[0], dd[0] ^ dd[1])),
             alu.operand_a.eq(lines[alu_pos]),
             alu.size.eq(s),
             alu.carry_in.eq(sw[0]),
@@ -603,21 +593,19 @@ class CPU(Component):
             md.signed.eq(md_signed),
         ]
         # the unary operations are done by the same ALU: they have no source
-        # operand, and RLC is ADC of the item with itself
+        # operand
         with m.If(is_unary):
             m.d.comb += alu.operand_b.eq(lines[alu_pos])
         with m.Else():
             m.d.comb += alu.operand_b.eq(src)
-        # which flags the operation sets besides Z N P: NEG and RLC set C and
-        # V, RRC sets C, NOT SXT and BSWAP neither
+        # which flags the operation sets besides Z N P: NEG sets C and V, NOT
+        # SXT and BSWAP neither
         set_c = Signal()
         set_v = Signal()
         with m.If(is_unary):
             m.d.comb += [
-                set_c.eq(
-                    (u_op == UOP_NEG) | (u_op == UOP_RLC) | (u_op == UOP_RRC)
-                ),
-                set_v.eq((u_op == UOP_NEG) | (u_op == UOP_RLC)),
+                set_c.eq(u_op == UOP_NEG),
+                set_v.eq(u_op == UOP_NEG),
             ]
         with m.Else():
             m.d.comb += [set_c.eq(~is_logic), set_v.eq(~is_logic)]
@@ -635,10 +623,6 @@ class CPU(Component):
                     m.d.comb += alu.op_code.eq(OpCodes.SXT)
                 with m.Case(UOP_BSWAP):
                     m.d.comb += alu.op_code.eq(OpCodes.BSWAP)
-                with m.Case(UOP_RLC):
-                    m.d.comb += alu.op_code.eq(OpCodes.ADC)
-                with m.Case(UOP_RRC):
-                    m.d.comb += alu.op_code.eq(OpCodes.RRC)
         with m.Elif(is_cmp):
             m.d.comb += alu.op_code.eq(Mux(op[0], OpCodes.AND, OpCodes.SUB))
         with m.Else():
@@ -1067,15 +1051,11 @@ class CPU(Component):
                     cmd.w0_data.eq(alu.result),
                 ]
                 with m.If(is_shift):
-                    # the result replaces the item, and with the count in TOS
-                    # the count is dropped: dd 2 of the ALU
-                    m.d.comb += [
-                        cmd.need.eq(need_of(sh_pos) | Mux(sh_var, 1, 0)),
-                        cmd.w0_data.eq(sh.data_out),
-                    ]
+                    m.d.comb += cmd.w0_data.eq(sh.data_out)
+                    # the count in TOS is read
                     with m.If(sh_var):
-                        m.d.comb += cmd.shift.eq(Shift.POP)
-                with m.Elif(is_unary):
+                        m.d.comb += cmd.need.eq(need_of(alu_pos) | 0b0001)
+                with m.If(is_unary | (is_shift & ~sh_var)):
                     # dd 0 and 1 replace the operand, 2 and 3 keep it and
                     # push the result on top or under TOS
                     with m.Switch(dd):
@@ -1083,13 +1063,13 @@ class CPU(Component):
                             m.d.comb += [
                                 cmd.w0_en.eq(0),
                                 cmd.shift.eq(Shift.PUSH),
-                                cmd.arg.eq(alu.result),
+                                cmd.arg.eq(Mux(is_shift, sh.data_out, alu.result)),
                             ]
                         with m.Case(3):
                             m.d.comb += [
                                 cmd.w0_en.eq(0),
                                 cmd.shift.eq(Shift.PUSH_UNDER),
-                                cmd.arg.eq(alu.result),
+                                cmd.arg.eq(Mux(is_shift, sh.data_out, alu.result)),
                             ]
                 with m.Else():
                     with m.Switch(dd):

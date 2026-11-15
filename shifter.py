@@ -9,6 +9,8 @@ class ShiftOp(enum.Enum, shape=3):
     SRA = 0b010
     ROL = 0b100
     ROR = 0b101
+    RCL = 0b110
+    RCR = 0b111
 
 
 class DualWidthBarrelShifter16(wiring.Component):
@@ -18,14 +20,19 @@ class DualWidthBarrelShifter16(wiring.Component):
     The count is the whole word: an immediate zero-extended, or TOS. A shift by the width
     (16, or 8 with `size`) or more saturates: the result is 0, for SRA the sign repeated.
     `carry_out` is the last bit shifted out (for SRA by the width or more the sign), and is
-    to be taken into C when `carry_upd` is set, that is when the count is not 0. For the
-    rotates the count is taken modulo the width and the carry is the bit that wrapped.
+    to be taken into C when `carry_upd` is set, that is when the count is not 0 (and always for
+    RCL and RCR). For the rotates the count is taken modulo the width and the carry is the bit
+    that wrapped.
+    RCL and RCR rotate through carry: the 17 bits (9 with `size`) of C and the data are
+    rotated by the low 4 bits of the count, 1..16 with 0 for 16 (modulo 9 with `size`);
+    `carry_in` is C and `carry_out` the new C.
     In 8-bit mode the upper byte of the input is ignored and the output is zero-extended.
     """
     data_in: In(16)
     shamt: In(16)
     op: In(ShiftOp)
     size: In(1)
+    carry_in: In(1)
     data_out: Out(16)
     carry_out: Out(1)
     carry_upd: Out(1)
@@ -94,13 +101,39 @@ class DualWidthBarrelShifter16(wiring.Component):
         with m.Else():
             m.d.comb += core.eq(final_stage)
 
+        # Rotates through carry: the left rotation of 17 bits (9 in 8-bit mode) by n, a right
+        # one by n is the left one by the width minus n
+        is_rc = (self.op == ShiftOp.RCL) | (self.op == ShiftOp.RCR)
+        count16 = Mux(self.shamt[:4] == 0, 16, self.shamt[:4])
+        n_rc = Mux(self.size, Mux(count16 >= 9, count16 - 9, count16), count16)
+        left_n = Mux(
+            self.op == ShiftOp.RCL,
+            n_rc,
+            Mux(n_rc == 0, 0, Mux(self.size, 9, 17) - n_rc),
+        )
+
+        rc_word = Cat(self.data_in, self.carry_in)
+        for i in range(5):
+            k = 1 << i
+            nxt = Signal(17, name=f'rc_word_{k}')
+            m.d.comb += nxt.eq(Mux(left_n[i], Cat(rc_word[17 - k:], rc_word[:17 - k]), rc_word))
+            rc_word = nxt
+        rc_byte = Cat(self.data_in[:8], self.carry_in)
+        for i in range(4):
+            k = 1 << i
+            nxt = Signal(9, name=f'rc_byte_{k}')
+            m.d.comb += nxt.eq(Mux(left_n[i], Cat(rc_byte[9 - k:], rc_byte[:9 - k]), rc_byte))
+            rc_byte = nxt
+        rc_data = Mux(self.size, Cat(rc_byte[:8], Const(0, 8)), rc_word[:16])
+        rc_carry = Mux(self.size, rc_byte[8], rc_word[16])
+
         # The result of a saturated shift: zeros, or the sign for SRA
         sat_value = Mux(
             is_arith,
             Mux(self.size, Cat(sign_bit.replicate(8), Const(0, 8)), sign_bit.replicate(16)),
             0,
         )
-        m.d.comb += self.data_out.eq(Mux(sat & ~is_rotate, sat_value, core))
+        m.d.comb += self.data_out.eq(Mux(is_rc, rc_data, Mux(sat & ~is_rotate, sat_value, core)))
 
         # The last bit shifted out is bit count - 1 to the right, bit width - count to the left
         neg = Signal(4)
@@ -115,7 +148,9 @@ class DualWidthBarrelShifter16(wiring.Component):
         sat_carry = Mux(is_arith, sign_bit, Mux(at_width, Mux(is_left, self.data_in[0], sign_bit), 0))
         top_out = Mux(self.size, self.data_out[7], self.data_out[15])
         rotate_carry = Mux(is_left, self.data_out[0], top_out)
-        m.d.comb += self.carry_out.eq(Mux(is_rotate, rotate_carry, Mux(sat, sat_carry, out_bit)))
-        m.d.comb += self.carry_upd.eq(self.shamt != 0)
+        m.d.comb += self.carry_out.eq(
+            Mux(is_rc, rc_carry, Mux(is_rotate, rotate_carry, Mux(sat, sat_carry, out_bit)))
+        )
+        m.d.comb += self.carry_upd.eq((self.shamt != 0) | is_rc)
 
         return m

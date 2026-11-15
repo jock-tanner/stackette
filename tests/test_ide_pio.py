@@ -328,11 +328,14 @@ def test_pins_by_hand():
         await wr(ctx, dut, REG_BB_CTRL, 1 | 0b11110)
         await settle(ctx, 3)
         assert ctx.get(p.reset_n) == 0 and ctx.get(p.dd_oe) == 0
-        # off: the cycles of the bus again
+        # off: the cycles of the bus again. The log of the pins shows the by-hand
+        # CS0# low as a selection (DA = 5, no strobe), then the read of the register 7
         await wr(ctx, dut, REG_BB_CTRL, 0)
         await rd(ctx, dut, 7)
         await settle(ctx)
-        assert len(cycles(log)) == 1
+        by_hand, read = cycles(log)
+        assert by_hand['da'] == 5 and by_hand['low'] is None
+        assert read['da'] == 7 and read['low'] is not None and not read['write']
 
     run_test(body)
 

@@ -45,7 +45,6 @@ LOGIC = {
     OpCodes.AND, OpCodes.OR, OpCodes.XOR, OpCodes.BIC, OpCodes.NOT,
     OpCodes.SXT, OpCodes.BSWAP,
 }
-SHIFTS_RIGHT = {OpCodes.RRC, OpCodes.SHR, OpCodes.SAR}
 WORD_ONLY = {OpCodes.SXT, OpCodes.BSWAP}
 FIELDS = ('result', 'carry', 'overflow', 'zero', 'sign', 'parity')
 
@@ -93,25 +92,12 @@ def ref(op, a, b, cin, bits):
             zero_src = int(a == 0)
             carry = zero_src if CARRY_IS_NOT_BORROW else 1 - zero_src
             overflow = int(a == msb)
-        case OpCodes.RRC:
-            res = (cin << (bits - 1)) | (a >> 1)
-            carry = a & 1
-        case OpCodes.SAR:
-            res = a >> 1
-            if a & msb:
-                # negative — mask the high bit
-                res |= msb
-            # carry gets the bit that fell out
-            carry = a & 1
-        case OpCodes.SHR:
-            res = a >> 1
-            carry = a & 1
         case _:
             raise ValueError(op)
 
     return {
         'result': res,
-        'carry': carry if op in SHIFTS_RIGHT or op not in LOGIC else None,
+        'carry': carry if op not in LOGIC else None,
         'overflow': None if op in LOGIC else overflow,
         'zero': int(res == 0),
         'sign': int(bool(res & msb)),

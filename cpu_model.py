@@ -27,7 +27,8 @@ OP_SWAP = 10
 OP_LEA = 11
 OP_CMP = 12
 OP_TST = 13
-U_NOT, U_NEG, U_SXT, U_BSWAP, U_RLC, U_RRC = range(6)
+U_NOT, U_NEG, U_SXT, U_BSWAP = range(4)
+SH_SHL, SH_SHR, SH_SAR, SH_ROL, SH_ROR, SH_RCL, SH_RCR = 0, 1, 2, 4, 5, 6, 7
 REG_NULL = 0
 REG_SP = 1
 REG_MBP = 2
@@ -144,6 +145,13 @@ def i_clrb(i):
 
 def i_unary(op, dd, s):
     return [0xe000 | dd << 8 | s << 7 | op << 3]
+
+
+def i_shift(kind, dd, s, count=None):
+    """count: 1..16 for the immediate one, None for the count in TOS"""
+    if count is None:
+        return [0xec00 | dd << 8 | s << 7 | kind << 4]
+    return [0xe800 | dd << 8 | s << 7 | kind << 4 | count & 15]
 
 
 def i_muldiv(div, signed, s):
@@ -317,7 +325,7 @@ class Ref:
         if grp == 2 and (w >> 10) & 3 == 1 and not w & 0x7f:
             self.muldiv((w >> 9) & 1, (w >> 8) & 1, (w >> 7) & 1)
             return None
-        if grp == 2 and (w >> 10) & 3 == 2 and (w >> 8) & 3 != 3:
+        if grp == 2 and (w >> 11) & 1 and (w >> 4) & 7 != 3 and not (w & 15 and (w >> 10) & 1):
             self.shift(w)
             return None
         if grp == 3 and not w & 0x800:
@@ -390,46 +398,72 @@ class Ref:
 
     def shift(self, w):
         """
-        SHL, SHR, SAR by a count: `11 10 10 kk s v dd cccc`. With v = 0 the count is cccc and
-        the item is TOS (dd 0) or NOS (dd 1), replaced in place. With v = 1 the count is TOS
-        (the whole word, unsigned), the item is NOS and the result replaces it: TOS is dropped.
-        A count of the width or more gives 0 (SAR: the sign), C is the last bit shifted out.
-        With a count of 0 the item and C stay, V is cleared by any real shift.
+        Shifts and rotates: `11 10 1v dd s kkk cccc`, `kkk` of shifter.ShiftOp (0 SHL, 1 SHR,
+        2 SAR, 4 ROL, 5 ROR, 6 RCL, 7 RCR through carry). With v = 0 the count is cccc, 0 for
+        16, and `dd` is that of the unary instructions. With v = 1 (cccc = 0) the count is TOS,
+        the whole word, and `dd` is that of the ALU instructions with TOS as the source:
+        1 shifts NOS and keeps the count, 2 shifts NOS and drops the count.
+        A shift by the width or more gives 0 (SAR: the sign), C is the last bit shifted out. The
+        rotates take the count modulo the width. RCL and RCR take the low 4 bits of the count,
+        0 for 16, and rotate the ring of C and the data (width + 1 bits) by it. With a count of 0
+        (not for RCL and RCR) the item, C and V stay, otherwise V is cleared.
         """
-        kind = (w >> 8) & 3
+        v = (w >> 10) & 1
+        dd = (w >> 8) & 3
         s = (w >> 7) & 1
-        v = (w >> 6) & 1
-        dd = (w >> 4) & 3
+        kind = (w >> 4) & 7
         bits = 8 if s else 16
         mask = (1 << bits) - 1
         if v:
-            count, pos = self.item(0), 1
+            count, pos = self.item(0), 1 if dd in (1, 2) else 0
         else:
-            count, pos = w & 15, dd & 1
+            count, pos = (w & 15) or 16, (dd & 1) ^ (dd >> 1)
         a = self.item(pos) & mask
         sign = a >> (bits - 1) & 1
+        if kind in (SH_RCL, SH_RCR):
+            # always rotates: the low 4 bits of the count, 0 for 16
+            count = count & 15 or 16
         if count == 0:
             r = a
         else:
-            if kind == 0:
+            if kind == SH_SHL:
                 r = a << count & mask if count < bits else 0
                 self.c = a >> (bits - count) & 1 if count <= bits else 0
-            elif kind == 1:
+            elif kind == SH_SHR:
                 r = a >> count if count < bits else 0
                 self.c = a >> (count - 1) & 1 if count <= bits else 0
-            else:
+            elif kind == SH_SAR:
                 fill = mask if sign else 0
                 r = (fill << (bits - count) | a >> count) & mask if count < bits else fill
                 self.c = a >> (count - 1) & 1 if count <= bits else sign
+            elif kind in (SH_ROL, SH_ROR):
+                n = count % bits
+                if kind == SH_ROR:
+                    n = (bits - n) % bits
+                r = (a << n | a >> (bits - n)) & mask
+                self.c = r & 1 if kind == SH_ROL else r >> (bits - 1)
+            else:
+                width = bits + 1
+                n = count % width
+                if kind == SH_RCR:
+                    n = (width - n) % width
+                full = self.c << bits | a
+                full = (full << n | full >> (width - n)) & (1 << width) - 1
+                r = full & mask
+                self.c = full >> bits
             self.v = 0
         self.z = int(r == 0)
         self.n = r >> (bits - 1) & 1
         self.p = int(bin(r).count('1') % 2 == 0)
-        if v:
+        if not v:
+            self.ld_put(dd, r)
+        elif dd == 0:
+            self.wr16(self.psp, r)
+        elif dd == 1:
+            self.wr16(self.psp + 2, r)
+        else:
             self.psp += 2
             self.wr16(self.psp, r)
-        else:
-            self.wr16(self.psp + 2 * pos, r)
 
     def unary(self, op, dd, s):
         # the operand is the item the ALU ops use: TOS for dd 0 and 3,
@@ -448,14 +482,6 @@ class Ref:
             r = sext(a & 0xff, 8) & 0xffff
         elif op == U_BSWAP:
             r = (a & 0xff) << 8 | a >> 8
-        elif op == U_RLC:
-            full = a << 1 | self.c
-            r = full & mask
-            self.c = full >> bits & 1
-            self.v = (a >> (bits - 1) ^ r >> (bits - 1)) & 1
-        elif op == U_RRC:
-            r = self.c << (bits - 1) | a >> 1
-            self.c = a & 1
         self.z = int(r == 0)
         self.n = r >> (bits - 1) & 1
         self.p = int(bin(r).count('1') % 2 == 0)
@@ -780,9 +806,33 @@ class Program:
         if d < self.max_depth:
             dds += [3]
         dd = r.choice(dds)
-        op = r.randrange(6)
+        op = r.randrange(4)
         s = 0 if op in (U_SXT, U_BSWAP) else r.getrandbits(1)
         self.emit(i_unary(op, dd, s), 1 if dd >= 2 else 0)
+        return True
+
+    def shift_one(self):
+        d = self.depth
+        if d < 1:
+            return False
+        r = self.rng
+        kind = r.choice([SH_SHL, SH_SHR, SH_SAR, SH_ROL, SH_ROR, SH_RCL, SH_RCR])
+        s = r.getrandbits(1)
+        if r.getrandbits(1) or d < 2:
+            dds = [0]
+            if d >= 2:
+                dds += [1]
+            if d >= 2 and d < self.max_depth:
+                dds += [2]
+            if d < self.max_depth:
+                dds += [3]
+            dd = r.choice(dds)
+            count = r.choice([r.randrange(1, 17), r.randrange(1, 17), 8, 16, 1])
+            self.emit(i_shift(kind, dd, s, count), 1 if dd >= 2 else 0)
+        else:
+            # the count is TOS: any word, so that most of the counts saturate
+            dd = r.choice([0, 1, 2, 3])
+            self.emit(i_shift(kind, dd, s), -1 if dd >= 2 else 0)
         return True
 
     def muldiv_one(self):
@@ -1089,8 +1139,11 @@ class Program:
                 self.block_skip_cc()
             case x if x < 0.74:
                 self.emit(r.choice([i_setb, i_clrb])(r.getrandbits(8)))
-            case x if x < 0.80:
+            case x if x < 0.77:
                 if not self.unary_one():
+                    self.ld_one()
+            case x if x < 0.82:
+                if not self.shift_one():
                     self.ld_one()
             case x if x < 0.86:
                 if not self.swap_one():

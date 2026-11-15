@@ -1,6 +1,7 @@
 """
 Test for shifter.py: SLL, SRL and SRA (shifts that saturate at the width, with the last bit
-shifted out as the carry) and ROL and ROR (modulo the width), of 16 or 8 bits, against a
+shifted out as the carry), ROL and ROR (modulo the width) and RCL and RCR (through carry, modulo
+the width + 1), of 16 or 8 bits, against a
 plain Python description. The same description is checked in test_shift_model.py against the
 reference model of the instructions SHL, SHR and SAR.
 
@@ -49,6 +50,18 @@ def spec_rotate(op, a, count, bits):
     return result, carry
 
 
+def spec_rc(op, a, count, bits, carry_in):
+    """The rotate through carry: C and the data are one ring of bits + 1, by the low 4 bits of count (0 is 16)"""
+    mask = (1 << bits) - 1
+    width = bits + 1
+    n = (count & 15 or 16) % width
+    v = (carry_in << bits | a & mask)
+    if op == ShiftOp.RCR:
+        n = (width - n) % width
+    v = (v << n | v >> (width - n)) & (1 << width) - 1
+    return v & mask, v >> bits
+
+
 VALUES = [
     0x0000, 0x0001, 0x0002, 0x0003, 0x007f, 0x0080, 0x0081, 0x00ff, 0x0100, 0x0101, 0x5a5a, 0x7fff,
     0x8000, 0x8001, 0x8080, 0xff00, 0xff7f, 0xff80, 0xffff, 0xaa55, 0x1234,
@@ -63,9 +76,11 @@ COUNTS = list(range(0, 36)) + [
 
 SHIFTS = (ShiftOp.SLL, ShiftOp.SRL, ShiftOp.SRA)
 ROTATES = (ShiftOp.ROL, ShiftOp.ROR)
+RCS = (ShiftOp.RCL, ShiftOp.RCR)
 
 
-async def apply(ctx, dut, op, a, count, size):
+async def apply(ctx, dut, op, a, count, size, carry_in=0):
+    ctx.set(dut.carry_in, carry_in)
     ctx.set(dut.op, op)
     ctx.set(dut.data_in, a)
     ctx.set(dut.shamt, count)
@@ -73,22 +88,24 @@ async def apply(ctx, dut, op, a, count, size):
     return ctx.get(dut.data_out), ctx.get(dut.carry_out), ctx.get(dut.carry_upd)
 
 
-async def check(ctx, dut, op, a, count, size):
+async def check(ctx, dut, op, a, count, size, carry_in=0):
     bits = 8 if size else 16
-    if op in ROTATES:
+    if op in RCS:
+        result, carry = spec_rc(op, a, count, bits, carry_in)
+    elif op in ROTATES:
         result, carry = spec_rotate(op, a, count, bits)
     else:
         result, carry = spec_shift(op, a, count, bits)
-    out, cy, upd = await apply(ctx, dut, op, a, count, size)
-    where = f'{op.name} size={size} a={a:#06x} count={count:#06x}'
+    out, cy, upd = await apply(ctx, dut, op, a, count, size, carry_in)
+    where = f'{op.name} size={size} a={a:#06x} count={count:#06x} carry_in={carry_in}'
     assert out == result, f'{where}: result {out:#06x}, expected {result:#06x}'
-    assert upd == int(count != 0), f'{where}: carry_upd {upd}'
+    assert upd == int(count != 0 or op in RCS), f'{where}: carry_upd {upd}'
     if carry is not None and upd:
         assert cy == carry, f'{where}: carry {cy}, expected {carry}'
     if size:
         # The upper byte of the input does not matter and that of the output is zero
         assert out >> 8 == 0, where
-        other, cy2, _ = await apply(ctx, dut, op, a ^ 0xff00, count, size)
+        other, cy2, _ = await apply(ctx, dut, op, a ^ 0xff00, count, size, carry_in)
         assert other == out and (cy2 == cy or not upd), f'{where}: the upper input byte matters'
 
 
@@ -106,10 +123,11 @@ def run_test(body):
 def test_corners():
     async def body(ctx, dut):
         for size in (0, 1):
-            for op in SHIFTS + ROTATES:
+            for op in SHIFTS + ROTATES + RCS:
                 for a in VALUES:
                     for count in COUNTS:
-                        await check(ctx, dut, op, a, count, size)
+                        for carry_in in (0, 1):
+                            await check(ctx, dut, op, a, count, size, carry_in)
     run_test(body)
 
 
@@ -118,22 +136,23 @@ def test_random():
         rng = random.Random(1)
         for _ in range(3000):
             size = rng.randrange(2)
-            op = rng.choice(SHIFTS + ROTATES)
+            op = rng.choice(SHIFTS + ROTATES + RCS)
             a = rng.randrange(1 << 16)
             count = rng.choice([rng.randrange(40), rng.randrange(1 << 16)])
-            await check(ctx, dut, op, a, count, size)
+            await check(ctx, dut, op, a, count, size, rng.randrange(2))
     run_test(body)
 
 
 def test_every_bit_every_count():
-    """One bit set at each position, every count 0..17: where each bit goes and what is shifted out"""
+    """One bit set at each position, every count 0..35: where each bit goes and what is shifted out"""
     async def body(ctx, dut):
         for size in (0, 1):
-            for op in SHIFTS + ROTATES:
+            for op in SHIFTS + ROTATES + RCS:
                 for bit in range(16):
-                    for count in range(18):
-                        await check(ctx, dut, op, 1 << bit, count, size)
-                        await check(ctx, dut, op, 0xffff ^ (1 << bit), count, size)
+                    for count in range(36):
+                        for carry_in in (0, 1):
+                            await check(ctx, dut, op, 1 << bit, count, size, carry_in)
+                            await check(ctx, dut, op, 0xffff ^ (1 << bit), count, size, carry_in)
     run_test(body)
 
 

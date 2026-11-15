@@ -11,10 +11,6 @@ class OpCodes(Enum, shape=4):
     SBC = 0b0011
     NEG = 0b0100
 
-    # shifts right by one bit, the carry gets the bit that fell out
-    SHR = 0b0101
-    SAR = 0b0110
-
     # logical
     AND = 0b1000
     OR  = 0b1001
@@ -25,9 +21,6 @@ class OpCodes(Enum, shape=4):
     # word only
     SXT = 0b1101
     BSWAP = 0b1110
-
-    # rotate right through carry, sets carry to the bit that fell out
-    RRC = 0b1111
 
 
 class Adder(Component):
@@ -117,12 +110,6 @@ class ALU(Component):
                     m.d.comb += i_result.eq(Cat(i_a[:8], i_a[7].replicate(8)))
                 with m.Case(OpCodes.BSWAP):
                     m.d.comb += self.result.eq(Cat(i_a[8:], i_a[:8]))
-                with m.Case(OpCodes.RRC):
-                    with m.If(self.size):
-                        m.d.comb += i_result.eq(Cat(i_a[1:8], self.carry_in))
-                    with m.Else():
-                        m.d.comb += i_result.eq(Cat(i_a[1:16], self.carry_in))
-                    m.d.comb += self.carry.eq(i_a[0])
         with m.Else():
             # arithmetic
             m.d.comb += i_result.eq(adder.sum[:16])
@@ -173,23 +160,5 @@ class ALU(Component):
                         adder.operand_a.eq(i_neg_a),
                         adder.operand_b.eq(0),
                     ]
-                # the shifts do not use the adder: they override its result
-                with m.Case(OpCodes.SHR, OpCodes.SAR):
-                    msb = Signal()
-                    m.d.comb += [
-                        msb.eq(
-                            Mux(
-                                self.op_code == OpCodes.SAR,
-                                Mux(self.size, i_a[7], i_a[15]),
-                                0,
-                            )
-                        ),
-                        self.carry.eq(i_a[0]),
-                        self.overflow.eq(0),
-                    ]
-                    with m.If(self.size):
-                        m.d.comb += i_result.eq(Cat(i_a[1:8], msb))
-                    with m.Else():
-                        m.d.comb += i_result.eq(Cat(i_a[1:16], msb))
 
         return m

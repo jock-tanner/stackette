@@ -50,26 +50,30 @@ Control flow:
     ret                 return: n is the word at [pfp] (the variadic form: the caller pushed it last)
     addp REG, #i        REG (mbp, midx or sp) += i, a signed byte count -128..127
     skip CC             skip the next instruction (of any length) if CC holds
-    not neg sxt bswap rlc rrc shr sar  DD
+    not neg sxt bswap  DD
                         unary operation (.b for 8 bits, not for sxt and bswap). The
                         operand is TOS for tos and under, NOS for nos and push; tos
                         and nos replace it, push puts the result on top of the stack
                         and under inserts it below TOS, the operand stays.
-                        neg and rlc set C Z N V P, rrc shr sar C Z N P, the others Z N P.
-                        rlc and rrc rotate through the carry. shr and sar shift right
-                        by one bit (shr puts 0 in at the top, sar copies the sign) and
-                        the carry gets the bit that fell out, so a long shift is two
-                        instructions: `shr nos` + `rrc tos` for the logical right
-                        shift of a long (low word TOS), `sar nos` + `rrc tos` for the
-                        arithmetic one, and `add tos, tos` + `adc nos, nos` for the
-                        left shift.
-    shl shr sar  tos|nos, #n    shift TOS or NOS in place by 0..15 bits
-    shl shr sar  push, tos      shift NOS by the count in TOS and drop TOS (the count is
-                        the whole word, unsigned; a count of the width (16, or 8 for .b)
-                        or more gives 0, for sar the sign). .b shifts the low byte and
-                        zero-extends. C gets the last bit shifted out (unchanged for a
-                        count of 0), V is cleared, Z N P from the result. With one operand
-                        shr and sar are the shifts by one bit above.
+                        neg sets C Z N V P, the others Z N P.
+    shl shr sar rol ror rcl rcr  DD, #n   shift or rotate by 1..16 bits, `DD` as above
+    shl shr sar rol ror rcl rcr  DD, tos  the count is TOS (the whole word, unsigned),
+                        `DD` as for the two-operand ALU operations with TOS as the source:
+                        the item is TOS for tos and under, NOS for nos and push; tos and
+                        nos replace it, push also drops TOS (the count) and under drops
+                        NOS. `push, tos` is the usual one: NOS is shifted and the count
+                        is gone. rcl and rcr rotate through the carry: C and the data
+                        are a ring of 17 bits (9 for .b), the count is 1..16 as for the
+                        immediate one: the low 4 bits of TOS, 0 for 16. The other shifts
+                        by the width (16, or 8 for .b) or more give 0, for sar the sign;
+                        ror and rol take the count modulo the width, and with TOS they
+                        do nothing for a count of 0. .b works on the low byte and
+                        zero-extends. C gets the last bit shifted out or rotated round
+                        (unchanged for a count of 0), V is cleared, Z N P from the
+                        result. A long shift by one bit is two instructions: `shr nos, #1`
+                        + `rcr tos, #1` for the logical right shift (low word TOS),
+                        `sar nos, #1` + `rcr tos, #1` for the arithmetic one, and
+                        `add tos, tos` + `adc nos, nos` for the left shift.
     mulu muls divu divs  (.b for 8 bits; no operands)
                         NOS and TOS are replaced by two results: TOS gets the
                         primary one, NOS the secondary one. mul: TOS * NOS, low part
@@ -248,13 +252,11 @@ def w_gen(op, dd, s, field, extra=None):
     return [w] if extra is None else [w, extra & 0xffff]
 
 
-UNARY = {
-    'not': 0, 'neg': 1, 'sxt': 2, 'bswap': 3, 'rlc': 4, 'rrc': 5,
-    'shr': 6, 'sar': 7,  # not instructions of their own: a shift by 1
-}
+UNARY = {'not': 0, 'neg': 1, 'sxt': 2, 'bswap': 3}
 # multiplication and division take no operands: NOS and TOS are replaced by
 # the primary result (TOS) and the secondary one (NOS)
-SHIFTS = {'shl': 0, 'shr': 1, 'sar': 2}
+SHIFTS = {'shl': 0, 'shr': 1, 'sar': 2, 'rol': 4, 'ror': 5, 'rcl': 6, 'rcr': 7}
+STACK_DD = {'tos': 0, 'nos': 1, 'push': 2, 'under': 3}
 MULDIV = {'mulu': 0xe400, 'muls': 0xe500, 'divu': 0xe600, 'divs': 0xe700}
 CTL = ('bra', 'call', 'calla', 'jmp', 'ret', 'addp', 'skip', 'setb', 'clrb', 'reti', 'trap', 'nop')
 CONDITIONS = {
@@ -355,34 +357,30 @@ def encode(mnemonic, operands, labels, pc=0):
         if operands:
             raise AsmError(f'{name} takes no operands')
         return [MULDIV[name] | (suffix == 'b') << 7]
-    if name in SHIFTS and len(operands) == 2:
+    if name in SHIFTS:
         if suffix not in ('', 'b'):
             raise AsmError(f'unknown size suffix .{suffix}')
-        dst, src = operands[0].lower(), operands[1]
-        if dst == 'push' and src.lower() == 'tos':
-            v, dd, n = 1, 0, 0
-        elif dst in ('tos', 'nos') and src[:1] in ('#', '$'):
-            v, dd = 0, 0 if dst == 'tos' else 1
-            n = value(src[1:], labels or {}) if labels is not None or is_number(src[1:]) else 0
-            if not 0 <= n <= 15:
-                raise AsmError(f'{name}: the count must be 0..15')
-        else:
-            raise AsmError(f'{name} takes tos|nos, #count or push, tos')
-        return [0xe800 | SHIFTS[name] << 8 | (suffix == 'b') << 7 | v << 6 | dd << 4 | n]
+        if len(operands) != 2 or operands[0].lower() not in STACK_DD:
+            raise AsmError(f'{name} takes tos|nos|push|under, #count or tos')
+        dd, src = STACK_DD[operands[0].lower()], operands[1]
+        word = 0xe800 | dd << 8 | (suffix == 'b') << 7 | SHIFTS[name] << 4
+        if src.lower() == 'tos':
+            return [word | 0x400]
+        if src[:1] not in ('#', '$'):
+            raise AsmError(f'{name} takes tos|nos|push|under, #count or tos')
+        n = value(src[1:], labels or {}) if labels is not None or is_number(src[1:]) else 1
+        if not 1 <= n <= 16:
+            raise AsmError(f'{name}: the count must be 1..16')
+        return [word | n & 15]
     if name in UNARY:
         if suffix not in ('', 'b'):
             raise AsmError(f'unknown size suffix .{suffix}')
-        dds = {'tos': 0, 'nos': 1, 'push': 2, 'under': 3}
+        dds = STACK_DD
         if len(operands) != 1 or operands[0].lower() not in dds:
             raise AsmError(f'{name} takes tos, nos, push or under')
         if suffix and name in ('sxt', 'bswap'):
             raise AsmError(f'{name} is a word operation')
         dd = dds[operands[0].lower()]
-        if name in ('shr', 'sar'):
-            # the shift by one is the shift by a count of 1
-            if dd > 1:
-                raise AsmError(f'{name} takes tos or nos')
-            return [0xe800 | SHIFTS[name] << 8 | (suffix == 'b') << 7 | dd << 4 | 1]
         return [0xe000 | dd << 8 | (suffix == 'b') << 7 | UNARY[name] << 3]
     if name == 'lea':
         if suffix:

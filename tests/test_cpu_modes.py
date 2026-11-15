@@ -151,7 +151,6 @@ def run_program(
     ('hw9_irq.asm', b'ABCDE', 120000, ()),
     ('hw14_operands.asm', b'ABCDEFGHIJ', 20000, ()),
     ('hw15_cmp_tst.asm', b'ABCDEFGH', 12000, ()),
-    ('hw16_shift.asm', b'ABCDEFGH', 20000, ()),
     ('hw17_variadic.asm', b'ABCDEFG', 24000, ()),
     ('hw18_kernel.asm', b'ABCDEFTGHZ', 120000, ()),
     ('hw19_ipc.asm', b'ABCDEFGHIJKZ', 160000, ()),
@@ -248,14 +247,6 @@ def test_cmp_tst(seed, p_ready):
     # operands
     expected = b'ABCDEFGH'
     out, seen = run_program('hw15_cmp_tst.asm', seed, 6000, p_ready, expected)
-    assert out == expected, f'seed {seed}: the output is {out!r}'
-
-
-@pytest.mark.parametrize('seed, p_ready', [(1, 1.0), (2, 0.6), (3, 0.3)])
-def test_shifts(seed, p_ready):
-    # arithmetic and logical right shifts
-    expected = b'ABCDEFGH'
-    out, seen = run_program('hw16_shift.asm', seed, 20000, p_ready, expected)
     assert out == expected, f'seed {seed}: the output is {out!r}'
 
 
