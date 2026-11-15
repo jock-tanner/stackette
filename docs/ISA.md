@@ -163,28 +163,25 @@ in stack cache (`2k` < 4).
 
 ### Monadic, Control, and Various Instructions (format 11)
 
-| Instruction                        | Encoding                 | Effect                                                                                  |
-|------------------------------------|--------------------------|-----------------------------------------------------------------------------------------|
-| `BRA l`                            | `11 00 0 lllllllllll`    | branch (with 11-bit signed offset)                                                      |
-| `SKIP cc`                          | `11 00 10 cccc 000000`   | skip the next instruction (any length) if condition (`cc`) holds                        |
-| `SETB #m`                          | `11 01 0000 iiiiiiii`    | set SR bits                                                                             |
-| `CLRB #m`                          | `11 01 1000 iiiiiiii`    | clear SR bits                                                                           |
-| `ADDP MBP\|MIDX\|PSP, #i`          | `11 01 01 rr iiiiiiii`   | register (`rr`: 0 MBP, 1 MIDX, 2 PSP) += signed byte                                    |
-| `NOT\|NEG\|SXT\|BSWAP dd`          | `11 10 00 dd s oooo 000` | monadic instructions (see below)                                                        |
-| `MULU\|MULS\|DIVU\|DIVS` (`.b`)    | `11 10 01 d g s 0000000` | signed/unsigned (`g`) division/subtraction (`d`) over words/bytes (`s`) on stack        |
-|                                    |                          |                                                                                         |
-| `SHL`, `SHR`, `SAR`, `ROL`, `ROR`  | `11 10 10 dd s kkk cccc` |                                                                                         |
-|                                    |                          |                                                                                         |
-|                                    |                          |                                                                                         |
-| `CALL l`                           | `11 11 0 lllllllllll`    | call (with 11-bit word offset)                                                          |
-| `NOP`                              | `11 11 100000 000000`    | no-op                                                                                   |
-| `RET #n`                           | `11 11 100001 iiiiii`    | return and subtract #n words from PSP                                                   |
-| `RETI`                             | `11 11 100010 000000`    | enter (return to) user mode                                                             |
-| `TRAP #p`                          | `11 11 100100 iiiiii`    | system call                                                                             |
-| `CALLA abs`                        | `11 11 100101 000000`    | call (address in next word)                                                             |
-| `JMP abs`                          | `11 11 100110 000000`    | jump (address in next word)                                                             |
-| `CALL POP`                         | `11 11 100111 000000`    | call (pop address from stack)                                                           |
-| `RET [SFP]`                        | `11 11 101001 000000`    | return and subtract the number of words, supplied by caller in last parameter, from PSP |
+| Instruction                                     | Encoding                  | Effect                                                                                  |
+|-------------------------------------------------|---------------------------|-----------------------------------------------------------------------------------------|
+| `BRA l`                                         | `11 00 0 lllllllllll`     | branch (with 11-bit signed offset)                                                      |
+| `SKIP cc`                                       | `11 00 10 cccc 000000`    | skip the next instruction (any length) if condition (`cc`) holds                        |
+| `SETB #m`                                       | `11 01 0000 iiiiiiii`     | set SR bits                                                                             |
+| `CLRB #m`                                       | `11 01 1000 iiiiiiii`     | clear SR bits                                                                           |
+| `ADDP MBP\|MIDX\|PSP, #i`                       | `11 01 01 rr iiiiiiii`    | register (`rr`: 0 MBP, 1 MIDX, 2 PSP) += signed byte                                    |
+| `NOT\|NEG\|SXT\|BSWAP dd`                       | `11 10 00 dd s oooo 000`  | monadic instructions (see below)                                                        |
+| `MULU\|MULS\|DIVU\|DIVS` (`.b`)                 | `11 10 01 d g s 0000000`  | signed/unsigned (`g`) division/subtraction (`d`) over words/bytes (`s`) on stack        |
+| `SHL`\|`SHR`\|`SAR`\|`ROL`\|`ROR`\|`RCL`\|`RCR` | `11 10 1 v dd s kkk cccc` | variable shifts and rotates (see below)                                                 |
+| `CALL l`                                        | `11 11 0 lllllllllll`     | call (with 11-bit word offset)                                                          |
+| `NOP`                                           | `11 11 100000 000000`     | no-op                                                                                   |
+| `RET #n`                                        | `11 11 100001 iiiiii`     | return and subtract #n words from PSP                                                   |
+| `RETI`                                          | `11 11 100010 000000`     | enter (return to) user mode                                                             |
+| `TRAP #p`                                       | `11 11 100100 iiiiii`     | system call                                                                             |
+| `CALLA abs`                                     | `11 11 100101 000000`     | call (address in next word)                                                             |
+| `JMP abs`                                       | `11 11 100110 000000`     | jump (address in next word)                                                             |
+| `CALL POP`                                      | `11 11 100111 000000`     | call (pop address from stack)                                                           |
+| `RET [SFP]`                                     | `11 11 101001 000000`     | return and subtract the number of words, supplied by caller in last parameter, from PSP |
 
 Monadic instructions are performed on stack destination (`dd`). `SXT`
 and `BSWAP` are word-only, other instructions have byte- and word-size
@@ -212,6 +209,28 @@ operands and result:
 | NOS | dividend | remainder (sign of the dividend) |
  
 Division by zero is fault 4, NOS and TOS remain unchanged.
+
+Variable **Shifts and rolls** have two forms, defined by `v` bit:
+
+- `v`==0: with 4-bit immediate counter in lower 4 bits of the instruction
+  (`c` field),
+- `v`==1: with counter in TOS.
+
+Counter value 0 is interpreted as 16, similar to 32-bit ARM.
+Shifts by 16 or more positions (8 or more if `s`==1) are saturated.
+
+The list of all kinds of shift/roll (`k` field).
+
+| Kind | Mnemonic | Meaning                       |
+|------|----------|-------------------------------|
+| 000  | `SHL`    | Left shift                    |
+| 001  | `SHR`    | Right logical shift           |
+| 010  | `SAR`    | Right arithmetic shift        |
+| 011  | reserved |                               |
+| 100  | `ROL`    | Left roll                     |
+| 101  | `ROR`    | Right roll                    |
+| 110  | `RCL`    | Left roll through carry flag  |
+| 111  | `RCR`    | Right roll through carry flag |
 
 Everything else is an illegal instruction.
 
@@ -302,10 +321,12 @@ changes), except the write-back fault, which is asynchronous.
 
 ## Peripherals (byte addresses in the data space, default map)
 
-| Address  | Device                                                                                                              |
-|----------|---------------------------------------------------------------------------------------------------------------------|
-| 0xf000   | UART                                                                                                                |
-| 0xf008   | interrupt controller (RAW, MASK, ACTIVE)                                                                            |
-| 0xf010   | timer (COUNT, COMPARE, CONTROL, STATUS, PRESCALE)                                                                   |
-| 0xf020   | context device: IP, RSP, SFP, MBP, MIDX, SW, PSP of the inactive context, then ID, FAULT_IP, FAULT_ADDR (read only) |
-| 0xf100   | MMU registers: 64 system, then 64 user (`space*16 + page`)                                                          |
+| Address        | Size, words | Device                                                                                                              |
+|----------------|-------------|---------------------------------------------------------------------------------------------------------------------|
+| 0xf000..0xf007 | 4           | UART                                                                                                                |
+| 0xf008..0xf00f | 4           | interrupt controller (RAW, MASK, ACTIVE)                                                                            |
+| 0xf010..0xf01f | 8           | timer (COUNT, COMPARE, CONTROL, STATUS, PRESCALE)                                                                   |
+| 0xf020..0xf03f | 16          | context device: IP, RSP, SFP, MBP, MIDX, SW, PSP of the inactive context, then ID, FAULT_IP, FAULT_ADDR (read only) |
+| 0xf040..0xf047 | 4           | SPI master (network controller)                                                                                     |
+| 0xf080..0xf0bf | 32          | IDE host                                                                                                            |
+| 0xf100..0xf1ff | 128         | MMU registers: 64 system, then 64 user (`space*16 + page`)                                                          |
