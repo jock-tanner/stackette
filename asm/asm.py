@@ -124,6 +124,11 @@ Operands (st takes no immediate):
     tos nos             the stack items, the same as [sp+0] and [sp+1]
     mbp midx sp null sr ip  register (sp or psp, sr: the status register, see below)
     [mbp+midx]  [mbp+midx++]  [mbp+--midx]      pointer, post-increment, pre-decrement
+    [mbp+midx++]*  [mbp+--midx]*    string forms: the instruction repeats until
+                        midx is 0 (it is skipped if midx is 0 already); midx
+                        steps by the size, so it must be a multiple of it.
+                        `st [mbp+midx++]*, pop` copies a block from the stack
+                        space, `st ...!, tos` fills one, `add tos, ...!` sums
     [expr]              absolute 16-bit byte address
     [sp+k]              stack item k (0 = TOS), k = 0..31
     [pfp+n]             frame-relative, n = even byte offset -128..126
@@ -210,6 +215,13 @@ def parse_operand(text):
         return ('sp', STACK_ITEMS[t.lower()])
     if t.lower() in REGS:
         return ('reg', REGS[t.lower()])
+    if t.startswith('[') and t.endswith(']*'):
+        low = t[1:-2].replace(' ', '').lower()
+        if low == 'mbp+midx++':
+            return ('str', 2)
+        if low == 'mbp+--midx':
+            return ('str', 3)
+        raise AsmError('only [mbp+midx++]* and [mbp+--midx]* repeat')
     if t.startswith('[') and t.endswith(']'):
         inner = t[1:-1].replace(' ', '')
         low = inner.lower()
@@ -241,6 +253,7 @@ def w_pfp(op, dd, s, f):
 # load sign-extending):
 #   000 0rrr    register r: 0 null, 1 sp, 2 mbp, 3 midx, 6 sr, 7 ip
 #   001 0 mm e  mm: 0 [mbp+midx], 1 [mbp+midx++], 2 [mbp+--midx], 3 [tos]
+#   001 1 mm e  mm 1 and 2 only: the same, repeated until midx is 0
 #   01 0000 e   [abs16]
 #   01 0001 0   #imm16
 #   1 kkkkk e   [sp+k]
@@ -428,7 +441,7 @@ def encode(mnemonic, operands, labels, pc=0):
     kind, arg = operand
     if suffix == 'bs' and (
         name != 'ld'
-        or kind not in ('ptr', 'tos', 'abs', 'sp')
+        or kind not in ('ptr', 'str', 'tos', 'abs', 'sp')
         or (kind == 'sp' and val(arg) < 4)
     ):
         raise AsmError(
@@ -453,6 +466,8 @@ def encode(mnemonic, operands, labels, pc=0):
         return w_gen(op, dd, s, F_REG | arg)
     if kind == 'ptr':
         return w_gen(op, dd, s, F_PTR | (arg - 1) << 1 | sx)
+    if kind == 'str':
+        return w_gen(op, dd, s, F_PTR | 8 | (arg - 1) << 1 | sx)
     if kind == 'tos':
         if name == 'st' and dd not in (1, 3):
             raise AsmError('st [tos] takes its value from nos or under')

@@ -68,7 +68,8 @@ def i_gen(op, dd, s, mode, x, extra=None, e=0):
     """
     An instruction of the GENERAL format, with the operand named by the
     logical mode: 0 register x, 1 2 3 [mbp+midx] and its post-increment and
-    pre-decrement forms, 4 #imm16, 5 [abs], 6 [sp+k] (k = x), 7 [tos]. `e`
+    pre-decrement forms, 4 #imm16, 5 [abs], 6 [sp+k] (k = x), 7 [tos], 8 9 the
+    string forms of the post-increment and pre-decrement modes. `e`
     (or the bit 0 of x in the modes 1 2 3 7) is the sign-extension flag of
     byte loads. The operand field is a prefix code, see gen_operand.
     """
@@ -78,6 +79,8 @@ def i_gen(op, dd, s, mode, x, extra=None, e=0):
         f = 0x10 | (mode - 1) << 1 | (x & 1 | e)
     elif mode == 7:
         f = 0x10 | 3 << 1 | (x & 1 | e)
+    elif mode in (8, 9):
+        f = 0x18 | (mode - 7) << 1 | (x & 1 | e)
     elif mode == 5:
         f = 0x20 | (x & 1 | e)
     elif mode == 4:
@@ -95,6 +98,9 @@ def gen_operand(w):
         000 0rrr    register r: 0 NULL, 1 PSP, 2 MBP, 3 MIDX, 6 SR, 7 IP
         001 0 mm e  mm: 0 [mbp+midx], 1 [mbp+midx++], 2 [mbp+--midx],
                     3 [tos]
+        001 1 mm e  string forms of mm 1 and 2 (0 and 3 are reserved): the
+                    instruction repeats until MIDX is 0, and is skipped
+                    if MIDX is 0 already; the logical mode is that of mm
         01 0000 e   [abs16]
         01 0001 0   #imm16
         1 kkkkk e   [sp+k]
@@ -105,6 +111,8 @@ def gen_operand(w):
     if f >> 3 == 0b0010:
         kind = (f >> 1) & 3
         return (7 if kind == 3 else kind + 1), 0, f & 1
+    if f >> 3 == 0b0011 and (f >> 1) & 3 in (1, 2):
+        return ((f >> 1) & 3) + 1, 0, f & 1
     if f >> 1 == 0b010000:
         return 5, 0, f & 1
     if f == 0b0100010:
@@ -231,6 +239,21 @@ class Ref:
             self.midx = (self.midx + (1 if s else 2)) & 0xffff
 
     def step(self, words, next_ip):
+        """
+        One instruction. The string forms (001 1 mm e) run it once and, while
+        MIDX is not 0, stay on it: the IP returned is its own address.
+        """
+        w = words[0]
+        if w >> 14 != 2 or w & 0x78 != 0x18:
+            return self.step1(words, next_ip)
+        if self.midx == 0:
+            return None
+        target = self.step1(words, next_ip)
+        if target is None and self.midx != 0:
+            return (next_ip - 2) & 0xffff
+        return target
+
+    def step1(self, words, next_ip):
         w = words[0]
         fmt = w >> 14
         op = (w >> 10) & 15

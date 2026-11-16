@@ -509,7 +509,7 @@ class SystemModel(Ref):
         f = w & 0x7f
         e = f & 1
         reg = f < 16
-        ptr = f >> 3 == 2
+        ptr = f >> 3 == 2 or (f >> 3 == 3 and (f >> 1) & 3 in (1, 2))
         tos_ptr = ptr and (f >> 1) & 3 == 3
         absm = f >> 1 == 0x10
         imm16 = f == 0x22
@@ -543,10 +543,10 @@ class SystemModel(Ref):
 
 def run(m, steps, quiet_stop=True):
     for _ in range(steps):
-        before = (m.ip, m.user)
+        before = (m.ip, m.user, m.midx)
         m.step_one()
         waiting = m.user and m.mask and (m.timer['run'] or m.uart_in)
-        if (m.ip, m.user) == before and not m.skipping and not waiting:
+        if (m.ip, m.user, m.midx) == before and not m.skipping and not waiting:
             # a branch to itself in the same context: stopped
             return m.steps
     return None

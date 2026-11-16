@@ -295,9 +295,15 @@ class CPU(Component):
         reg_ok = reg_mode & ~op_field[3] & (~op_field[2] | op_field[1])
         ptr_group = is_gen & (op_field[3:7] == 0b0010)
         ptr_kind = op_field[1:3]
-        ptr_mode = ptr_group & (ptr_kind != 3)
-        ptr_inc = ptr_group & (ptr_kind == 1)
-        ptr_dec = ptr_group & (ptr_kind == 2)
+        # the string forms 001 1 mm e: the same, and the instruction repeats
+        # until MIDX is 0; only the modes 1 and 2 exist
+        str_group = is_gen & (op_field[3:7] == 0b0011)
+        str_inc = str_group & (ptr_kind == 1)
+        str_dec = str_group & (ptr_kind == 2)
+        str_mode = str_inc | str_dec
+        ptr_mode = (ptr_group & (ptr_kind != 3)) | str_mode
+        ptr_inc = (ptr_group & (ptr_kind == 1)) | str_inc
+        ptr_dec = (ptr_group & (ptr_kind == 2)) | str_dec
         # [tos]: the address is TOS
         tos_ptr = ptr_group & (ptr_kind == 3)
         abs_mode = is_gen & (op_field[1:7] == 0b010000)
@@ -312,7 +318,7 @@ class CPU(Component):
         )
         # the operands that exist: an item of the stack has no sign flag
         gen_ok = (
-                reg_ok | ptr_group | abs_mode | imm16_mode
+                reg_ok | ptr_group | str_mode | abs_mode | imm16_mode
                 | (sp_mode & ~(sp_stack & e))
         )
         ok_ld = is_ld & (~is_gen | gen_ok)
@@ -562,18 +568,6 @@ class CPU(Component):
         m.submodules.alu = alu = ALU()
         m.submodules.muldiv = md = MulDiv()
         m.submodules.shifter = sh = DualWidthBarrelShifter16()
-        # the shifter: the ALU item, shifted by TOS or by the immediate count
-        # (cccc, 0 for 16)
-        alu_pos = Signal(2)
-        m.d.comb += [
-            sh.data_in.eq(lines[alu_pos]),
-            sh.shamt.eq(Mux(sh_var, stack.d0, Cat(instr[0:4], instr[0:4] == 0))),
-            sh.size.eq(s),
-            sh.carry_in.eq(sw[0]),
-            sh.op.eq(instr[4:7]),
-        ]
-        sh_n = Signal()
-        m.d.comb += sh_n.eq(Mux(s, sh.data_out[7], sh.data_out[15]))
         md_a = Signal(16)       # MUL, DIV: NOS
         md_b = Signal(16)       # MUL, DIV: TOS
 
@@ -581,6 +575,7 @@ class CPU(Component):
         # unary operations use the same item as their operand. CMP and TST
         # compare TOS for dd 0 and 2, NOS for dd 1 and 3, like ST, and the
         # pop of dd 2 and the removal of dd 3 follow.
+        alu_pos = Signal(2)
         m.d.comb += [
             alu_pos.eq(Mux(is_cmp, dd[0], dd[0] ^ dd[1])),
             alu.operand_a.eq(lines[alu_pos]),
@@ -592,6 +587,17 @@ class CPU(Component):
             md.size.eq(s),
             md.signed.eq(md_signed),
         ]
+        # the shifter: the ALU item, shifted by TOS or by the immediate count
+        # (cccc, 0 for 16)
+        m.d.comb += [
+            sh.data_in.eq(lines[alu_pos]),
+            sh.shamt.eq(Mux(sh_var, stack.d0, Cat(instr[0:4], instr[0:4] == 0))),
+            sh.size.eq(s),
+            sh.carry_in.eq(sw[0]),
+            sh.op.eq(instr[4:7]),
+        ]
+        sh_n = Signal()
+        m.d.comb += sh_n.eq(Mux(s, sh.data_out[7], sh.data_out[15]))
         # the unary operations are done by the same ALU: they have no source
         # operand
         with m.If(is_unary):
@@ -754,6 +760,9 @@ class CPU(Component):
                         m.next = 'FETCH'
                 with m.Elif(~ok):
                     abort(ID_FAULT | FAULT_ILLEGAL)
+                with m.Elif(str_mode & (midx == 0)):
+                    # a string instruction with nothing to do
+                    m.next = 'FETCH'
                 with m.Elif(needs_extra):
                     m.next = 'EXTRA'
                 with m.Else():
@@ -1036,6 +1045,9 @@ class CPU(Component):
                     # the commit: MIDX steps for the post-increment and
                     # pre-decrement modes
                     m.d.sync += midx.eq(midx_next)
+                    # a string instruction goes on: IP back to its start
+                    with m.If(str_mode & (midx_next != 0)):
+                        m.d.sync += ip.eq(istart)
                     m.next = 'FETCH'
 
             # ---- ALU: result and flags in one cache command ----
@@ -1080,6 +1092,9 @@ class CPU(Component):
                 with m.If(stack.fault):
                     stack_refused()
                 with m.Elif(cmd.ready):
+                    # a string instruction goes on: IP back to its start
+                    with m.If(str_mode & (midx_next != 0)):
+                        m.d.sync += ip.eq(istart)
                     m.d.sync += [
                         midx.eq(midx_next),
                         sw[1].eq(alu.zero),
@@ -1439,6 +1454,9 @@ class CPU(Component):
                         m.d.sync += ph2.eq(1)
                     with m.Else():
                         m.d.sync += midx.eq(midx_next)
+                        # a string instruction goes on: IP back to its start
+                        with m.If(str_mode & (midx_next != 0)):
+                            m.d.sync += ip.eq(istart)
                         m.next = 'FETCH'
 
             # ---- abandoning an instruction ----

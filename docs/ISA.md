@@ -133,15 +133,18 @@ instructions extends byte operands with zero.
 This is the most complex part of dyadic instruction variants in both function
 and encoding.
 
-| Bit layout             | Addressing mode                                                                                                                                     |
-|------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `000 rrrr`             | register, encoded in `r`                                                                                                                            |
-| `0010 mm e`            | `mm`=0: index `[MBP + MIDX]`<br/>`mm`=1: post-increment `[MBP + MIDX++]`<br/>`mm`=2: pre-decrement `[MBP + --MIDX]`<br/>`mm`=3: TOS-related `[TOS]` |
-| `0011 xxx`             | reserved                                                                                                                                            |
-| `010000 e`             | absolute `[abs16]`, address word follows                                                                                                            |
-| `0100010`              | immediate `#imm16`, source word follows (illegal with ST)                                                                                           |
-| `0100011` to `0111111` | reserved                                                                                                                                            | 
-| `1 kkkkk e`            | PSP-relative `[PSP+2k]`, `kkkkk` is unsigned.<br/>`[PSP+0]` is TOS, and `[PSP+1]` is NOS                                                                |
+| Bit layout             | Addressing mode                                                                                                                                 |
+|------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| `000 rrrr`             | register, encoded in `r`                                                                                                                        |
+| `0010 mm e`            | `m`=0: index `[MBP + MIDX]`<br/>`m`=1: post-increment `[MBP + MIDX++]`<br/>`m`=2: pre-decrement `[MBP + --MIDX]`<br/>`m`=3: TOS-related `[TOS]` |
+| `0011 mm e`            | `m`=1: post-increment string mode `[MBP + MIDX++]*`<br/>`m`=2: pre-decrement string mode `[MBP + --MIDX]*`<br/>`m`=0, 3: reserved               |
+| `010000 e`             | absolute `[abs16]`, address word follows                                                                                                        |
+| `0100010`              | immediate `#imm16`, source word follows (illegal with ST)                                                                                       |
+| `0100011` to `0111111` | reserved                                                                                                                                        | 
+| `1 kkkkk e`            | PSP-relative `[PSP+2k]`, `kkkkk` is unsigned.<br/>`[PSP+0]` is TOS, and `[PSP+1]` is NOS                                                        |
+
+**String mode** means an instruction repeated until a condition is met: `MIDX`==0.
+String mode with `MIDX`==0 on entry means “nothing to do”.
 
 Byte operand extension for LD: `e`=0 operand is zero-extended (`ld.b`), `e`=1 operand
 is sign-extended (`ld.bs`). May not be supported for PSP-relative addressing with operand
