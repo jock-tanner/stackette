@@ -511,7 +511,7 @@ class SystemModel(Ref):
         reg = f < 16
         ptr = f >> 3 == 2 or (f >> 3 == 3 and (f >> 1) & 3 in (1, 2))
         tos_ptr = ptr and (f >> 1) & 3 == 3
-        absm = f >> 1 == 0x10
+        absm = f >> 1 in (0x10, 0x12)
         imm16 = f == 0x22
         spm = bool(f & 0x40)
         k = (f >> 1) & 0x1f

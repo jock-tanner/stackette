@@ -24,6 +24,15 @@ def test_string():
     assert bytes(m.out).decode() == 'ABCDEFGH'
 
 
+def test_abs_string():
+    with open(os.path.join(ROOT, 'hwtest', 'hw34_absstr.asm')) as f:
+        src = f.read()
+    words, _ = assemble(src)
+    m = SystemModel(b''.join(w.to_bytes(2, 'little') for w in words))
+    run(m, 20000)
+    assert bytes(m.out).decode() == 'ABCD'
+
+
 def test_reserved_modes():
     # st pop (op 9, dd 2) with the string field 001 1 mm e
     for mm, legal in ((0, False), (1, True), (2, True), (3, False)):
@@ -34,5 +43,6 @@ def test_reserved_modes():
 
 if __name__ == '__main__':
     test_string()
+    test_abs_string()
     test_reserved_modes()
     print('test_string ok')

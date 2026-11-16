@@ -300,21 +300,26 @@ class CPU(Component):
         str_group = is_gen & (op_field[3:7] == 0b0011)
         str_inc = str_group & (ptr_kind == 1)
         str_dec = str_group & (ptr_kind == 2)
-        str_mode = str_inc | str_dec
-        ptr_mode = (ptr_group & (ptr_kind != 3)) | str_mode
+        str_ptr = str_inc | str_dec
+        # 01 0010 e: [abs16] with the repeat: the address stays, MIDX is the
+        # byte count and goes down by the size
+        str_abs = is_gen & (op_field[1:7] == 0b010010)
+        str_mode = str_ptr | str_abs
+        ptr_mode = (ptr_group & (ptr_kind != 3)) | str_ptr
         ptr_inc = (ptr_group & (ptr_kind == 1)) | str_inc
         ptr_dec = (ptr_group & (ptr_kind == 2)) | str_dec
         # [tos]: the address is TOS
         tos_ptr = ptr_group & (ptr_kind == 3)
         abs_mode = is_gen & (op_field[1:7] == 0b010000)
+        abs_any = abs_mode | str_abs
         imm16_mode = is_gen & (op_field == 0b0100010)
         sp_mode = is_gen & op_field[6]
         sp_k = op_field[1:6]
         sp_stack = sp_mode & (sp_k < 4)
         sp_mem = sp_mode & (sp_k >= 4)
-        needs_extra = imm16_mode | abs_mode | is_call_abs | is_jmp_abs
+        needs_extra = imm16_mode | abs_any | is_call_abs | is_jmp_abs
         mem_operand = (
-                (is_pfp & ~is_lea) | ptr_mode | abs_mode | sp_mem | tos_ptr
+                (is_pfp & ~is_lea) | ptr_mode | abs_any | sp_mem | tos_ptr
         )
         # the operands that exist: an item of the stack has no sign flag
         gen_ok = (
@@ -366,13 +371,13 @@ class CPU(Component):
         ]
         with m.If(ptr_inc):
             m.d.comb += midx_next.eq(midx + size)
-        with m.Elif(ptr_dec):
+        with m.Elif(ptr_dec | str_abs):
             m.d.comb += midx_next.eq(midx_pre)
 
         ea = Signal(16)
         with m.If(is_pfp):
             m.d.comb += ea.eq(pfp + off)
-        with m.Elif(abs_mode):
+        with m.Elif(abs_any):
             m.d.comb += ea.eq(extra)
         with m.Elif(ptr_mode):
             m.d.comb += ea.eq(mbp + midx_eff)
@@ -488,7 +493,7 @@ class CPU(Component):
         ))
 
         # sign extension flag of byte loads through pointers
-        sx = (ptr_mode | tos_ptr | abs_mode | sp_mem) & s & e & ~is_swap
+        sx = (ptr_mode | tos_ptr | abs_any | sp_mem) & s & e & ~is_swap
         byte = Signal(8)
         m.d.comb += byte.eq(Mux(lane, resp.data[8:16], resp.data[0:8]))
 
@@ -760,7 +765,7 @@ class CPU(Component):
                         m.next = 'FETCH'
                 with m.Elif(~ok):
                     abort(ID_FAULT | FAULT_ILLEGAL)
-                with m.Elif(str_mode & (midx == 0)):
+                with m.Elif(str_mode & (midx == 0) & ~needs_extra):
                     # a string instruction with nothing to do
                     m.next = 'FETCH'
                 with m.Elif(needs_extra):
@@ -790,6 +795,9 @@ class CPU(Component):
                     ]
                     with m.If(skipping):
                         m.d.sync += skipping.eq(0)
+                        m.next = 'FETCH'
+                    with m.Elif(str_mode & (midx == 0)):
+                        # a string instruction with nothing to do
                         m.next = 'FETCH'
                     with m.Else():
                         m.next = 'EXEC'

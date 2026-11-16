@@ -124,6 +124,10 @@ Operands (st takes no immediate):
     tos nos             the stack items, the same as [sp+0] and [sp+1]
     mbp midx sp null sr ip  register (sp or psp, sr: the status register, see below)
     [mbp+midx]  [mbp+midx++]  [mbp+--midx]      pointer, post-increment, pre-decrement
+    [expr]*             [abs] again and again: midx is the byte count, going down
+                        by the size to 0 (skipped if it is 0 already).
+                        `ld push, [port]*` reads a port into the stack (the
+                        first word deepest), `st [port]*, pop` writes it
     [mbp+midx++]*  [mbp+--midx]*    string forms: the instruction repeats until
                         midx is 0 (it is skipped if midx is 0 already); midx
                         steps by the size, so it must be a multiple of it.
@@ -221,7 +225,9 @@ def parse_operand(text):
             return ('str', 2)
         if low == 'mbp+--midx':
             return ('str', 3)
-        raise AsmError('only [mbp+midx++]* and [mbp+--midx]* repeat')
+        if low in ('mbp+midx', 'tos') or low.startswith(('sp+', 'pfp')):
+            raise AsmError('only [mbp+midx++]*, [mbp+--midx]* and [abs]* repeat')
+        return ('absstr', t[1:-2].strip())
     if t.startswith('[') and t.endswith(']'):
         inner = t[1:-1].replace(' ', '')
         low = inner.lower()
@@ -254,6 +260,7 @@ def w_pfp(op, dd, s, f):
 #   000 0rrr    register r: 0 null, 1 sp, 2 mbp, 3 midx, 6 sr, 7 ip
 #   001 0 mm e  mm: 0 [mbp+midx], 1 [mbp+midx++], 2 [mbp+--midx], 3 [tos]
 #   001 1 mm e  mm 1 and 2 only: the same, repeated until midx is 0
+#   01 0010 e   [abs16] repeated, midx counts down by the size to 0
 #   01 0000 e   [abs16]
 #   01 0001 0   #imm16
 #   1 kkkkk e   [sp+k]
@@ -441,7 +448,7 @@ def encode(mnemonic, operands, labels, pc=0):
     kind, arg = operand
     if suffix == 'bs' and (
         name != 'ld'
-        or kind not in ('ptr', 'str', 'tos', 'abs', 'sp')
+        or kind not in ('ptr', 'str', 'tos', 'abs', 'absstr', 'sp')
         or (kind == 'sp' and val(arg) < 4)
     ):
         raise AsmError(
@@ -474,6 +481,8 @@ def encode(mnemonic, operands, labels, pc=0):
         return w_gen(op, dd, s, F_PTR | 3 << 1 | sx)
     if kind == 'abs':
         return w_gen(op, dd, s, F_ABS | sx, val(arg))
+    if kind == 'absstr':
+        return w_gen(op, dd, s, F_ABS | 4 | sx, val(arg))
     if kind == 'sp':
         k = val(arg)
         if not 0 <= k <= 31:

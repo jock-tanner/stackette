@@ -139,6 +139,7 @@ and encoding.
 | `0010 mm e`            | `m`=0: index `[MBP + MIDX]`<br/>`m`=1: post-increment `[MBP + MIDX++]`<br/>`m`=2: pre-decrement `[MBP + --MIDX]`<br/>`m`=3: TOS-related `[TOS]` |
 | `0011 mm e`            | `m`=1: post-increment string mode `[MBP + MIDX++]*`<br/>`m`=2: pre-decrement string mode `[MBP + --MIDX]*`<br/>`m`=0, 3: reserved               |
 | `010000 e`             | absolute `[abs16]`, address word follows                                                                                                        |
+| `010010 e`             | absolute string `[abs16]*` with address word, `MIDX` is the byte count                                                                          |
 | `0100010`              | immediate `#imm16`, source word follows (illegal with ST)                                                                                       |
 | `0100011` to `0111111` | reserved                                                                                                                                        | 
 | `1 kkkkk e`            | PSP-relative `[PSP+2k]`, `kkkkk` is unsigned.<br/>`[PSP+0]` is TOS, and `[PSP+1]` is NOS                                                        |
