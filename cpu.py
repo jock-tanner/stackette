@@ -550,9 +550,13 @@ class CPU(Component):
         m.d.comb += addp_i.eq(instr[0:8])
 
         # the branch or call target
+        # the relative target is added up while DECODE looks at the
+        # instruction (IP already points past it), so the adder is not on
+        # the path from the instruction register to IP
+        tgt_rel = Signal(16)
         tgt = Signal(16)
         with m.If(is_bra | is_call_rel):
-            m.d.comb += tgt.eq(ip + rel_off)
+            m.d.comb += tgt.eq(tgt_rel)
         with m.Elif(is_call_abs | is_jmp_abs):
             m.d.comb += tgt.eq(extra)
         with m.Else():
@@ -755,6 +759,7 @@ class CPU(Component):
                     m.next = 'DECODE'
 
             with m.State('DECODE'):
+                m.d.sync += tgt_rel.eq(ip + rel_off)
                 with m.If(skipping):
                     # fetch the skipped instruction's extra word, if it has
                     # one, to get past it, and do not execute it
@@ -764,7 +769,9 @@ class CPU(Component):
                         m.d.sync += skipping.eq(0)
                         m.next = 'FETCH'
                 with m.Elif(~ok):
-                    abort(ID_FAULT | FAULT_ILLEGAL)
+                    # the fault is raised in the next state, to keep the
+                    # wide decode of `ok` away from the fault registers
+                    m.next = 'ILLEGAL'
                 with m.Elif(str_mode & (midx == 0) & ~needs_extra):
                     # a string instruction with nothing to do
                     m.next = 'FETCH'
@@ -772,6 +779,9 @@ class CPU(Component):
                     m.next = 'EXTRA'
                 with m.Else():
                     m.next = 'EXEC'
+
+            with m.State('ILLEGAL'):
+                abort(ID_FAULT | FAULT_ILLEGAL)
 
             # the extra word of imm16 and abs16 follows the instruction
             with m.State('EXTRA'):
