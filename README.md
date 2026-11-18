@@ -41,3 +41,26 @@ Consult the [docs](docs) on how to connect the peripherals to the board.
 ```shell
 $> pytest -n auto --dist worksteal .
 ```
+
+### The Current State
+
+The [ISA](docs/ISA.md) is 99% stabilized. Everything works in hardware, tests are good.
+
+Additional goodies:
+- an LLM-produced [port of ACK](https://gitlab.com/jock_tanner/ack)
+  compiler with custom, overlay-capable linker and other stuff (in Python),
+- an LLM-produced [port of Minix 2](https://gitlab.com/jock_tanner/minix)
+  with networking and multi-user capabilities. A lot of software is untested though.
+
+### Future Plans
+
+- Get the compiler to self-host.
+- Add virtual memory support.
+- Add hardware floating point device.
+- Add hardware support for modern cryptography. 
+- Ramp up the usability of the system: port additional software, smooth some rough
+  edges in terms of speed and capabilities as a general purpose system.
+
+Being unemployable in my current field (software engineer, backend & full-stack web
+development), I applied on a low-rank position in woodworking recently, so the progress
+might be quite slow.
