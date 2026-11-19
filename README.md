@@ -45,8 +45,8 @@ $> pytest -n auto --dist worksteal .
 ### The Current State
 
 The [ISA](docs/ISA.md) is 99% stabilized. Everything works in hardware, tests are good.
-The CPU has a reasonable integer performance of 1518 dhrystones/s, on par with
-8MHz IBM PC/AT.
+The CPU has a reasonable integer performance of 1902 dhrystones/s, on par with
+10MHz IBM PC/AT.
 
 Additional goodies:
 - an LLM-produced [port of ACK](https://gitlab.com/jock_tanner/ack)

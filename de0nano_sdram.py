@@ -16,7 +16,9 @@ from amaranth.lib import wiring
 from amaranth.lib.wiring import In
 
 from memory_port import MemoryPort
-from sdram_controller import HOST_ADDR_WIDTH, SDRAMController, SDRAMPins
+from sdram_controller import (
+    CLOCK_FREQ, HOST_ADDR_WIDTH, POWERUP_TIME, SDRAMController, SDRAMPins,
+)
 from pll_clock import DE0NanoSDRAMPLL
 
 
@@ -58,17 +60,21 @@ class DE0NanoSDRAM(wiring.Component):
     Clocking, power-up reset hold, SDRAM controller and pins.
 
     reset_cycles: how long the controller is held in reset after the PLL
-    locks (the SDRAM needs time after power-up before initialization).
-    read_delay: see SDRAMController.
+    locks (the SDRAM needs time after power-up before initialization);
+    the default is the datasheet's power-up wait (POWERUP_TIME).
+    read_delay, cas_latency: see SDRAMController.
     Until the controller's init sequence finishes, bus.req.ready stays low,
     so users just keep valid asserted and need no startup state of their own.
     """
     bus: In(MemoryPort(HOST_ADDR_WIDTH))
 
-    def __init__(self, *, reset_cycles=1024, read_delay=1):
+    def __init__(self, *, reset_cycles=None, read_delay=1, cas_latency=2):
         super().__init__()
+        if reset_cycles is None:
+            reset_cycles = POWERUP_TIME * CLOCK_FREQ
         self.reset_cycles = reset_cycles
         self.read_delay = read_delay
+        self.cas_latency = cas_latency
 
     def elaborate(self, platform):
         m = Module()
@@ -93,7 +99,9 @@ class DE0NanoSDRAM(wiring.Component):
             ResetSignal('sdram_ctl').eq(~pll.locked | (hold != 0)),
         ]
 
-        controller = SDRAMController(read_delay=self.read_delay)
+        controller = SDRAMController(
+            read_delay=self.read_delay, cas_latency=self.cas_latency,
+        )
         m.submodules.controller = DomainRenamer({'sync': 'sdram_ctl'})(controller)
         m.submodules.phy = phy = DE0NanoSDRAMPhy(clk=pll.clk_sdram)
 

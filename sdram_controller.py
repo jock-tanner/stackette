@@ -30,6 +30,14 @@ handshake on `bus.req`:
   * we = 0 reads 16 bits from addr; the result appears on `bus.resp`
     a few clocks later, when resp.valid pulses.
 
+Timing (50 MHz, CL2, all derived from the -7 datasheet minimums, see T_*):
+  * write: ACT, WRITE the next clock (tRCD 15 ns), ready again 2 clocks after
+    the WRITE: 3 clocks per write. Read: 5 clocks from accept to response.
+  * Every access ends with auto precharge and the spacing of the next
+    command includes tRP, so refresh needs no PRECHARGE: REF, one NOP, ready
+    again (3 clocks), once per tREF/8192 minus a margin.
+  * Init: 200 us hold (the board wrapper), PRECHARGE ALL, 8 REF, MRS.
+
 Reset:
   * The controller uses the reset of the domain it runs in (e.g. "sync", or
     whatever you rename it to with DomainRenamer). Reset (or power-up)
@@ -47,8 +55,27 @@ from amaranth.lib.wiring import Component, In, Out, Signature
 from memory_port import MemoryPort
 
 CLOCK_FREQ = 50         # MHz, frequency of the controller's clock
-REFRESH_TIME = 32       # ms (how often we need to refresh)
+REFRESH_TIME = 64       # ms (how often we need to refresh)
 REFRESH_COUNT = 8192    # refresh cycles required per refresh_time
+REFRESH_MARGIN = 12     # clocks: a refresh may wait for an access that is
+                        # already running (longest one is under 8 clocks)
+POWERUP_TIME = 200      # us of stable clock + NOPs before the first command
+                        # (datasheet: 100 us)
+INIT_REFRESHES = 8      # auto refreshes during init (datasheet: at least 2)
+
+# IS42S16160G-7 minimums in ns (datasheet Rev. F, -7 column). Everything the
+# controller waits for is derived from these and CLOCK_FREQ, so a different
+# clock needs no other change.
+T_RCD = 15      # ACT to READ/WRITE
+T_RP = 15       # PRECHARGE to ACT (also what auto precharge needs)
+T_RC = 60       # ACT to ACT / REF to ACT, same bank (this part: any bank)
+T_DAL = 30      # last write data to the next ACT/REF, with auto precharge
+                # (tDPL 14 + tRP 15, rounded up as the datasheet does)
+
+
+def clocks(ns):
+    """Smallest whole number of controller clocks that is >= ns."""
+    return (ns * CLOCK_FREQ + 999) // 1000
 
 ROW_WIDTH = 13
 COL_WIDTH = 9
@@ -68,13 +95,9 @@ class State(IntEnum):
     INIT_NOP1_1 = 0b00101
     INIT_REF1 = 0b01010
     INIT_NOP2 = 0b01011
-    INIT_REF2 = 0b01100
-    INIT_NOP3 = 0b01101
     INIT_LOAD = 0b01110
     INIT_NOP4 = 0b01111
 
-    REF_PRE = 0b00001
-    REF_NOP1 = 0b00010
     REF_REF = 0b00011
     REF_NOP2 = 0b00100
 
@@ -83,7 +106,6 @@ class State(IntEnum):
     READ_CAS = 0b10010
     READ_NOP2 = 0b10011
     READ_READ = 0b10100
-    READ_WAIT = 0b10101
 
     WRIT_ACT = 0b11000
     WRIT_NOP1 = 0b11001
@@ -130,18 +152,42 @@ class SDRAMController(Component):
     bus: In(MemoryPort(HOST_ADDR_WIDTH))
     sdram: Out(SDRAMPins())
 
-    def __init__(self, *, read_delay=1):
+    def __init__(self, *, read_delay=1, cas_latency=2):
         """
-        read_delay: extra clocks to wait before the read data is captured
-        (resp.valid comes that much later). The data is captured in the
-        READ_READ state; with CAS latency 3 and a phase-shifted SDRAM clock
-        it may not be valid yet there. 0 is the original timing.
+        cas_latency: 2 or 3, programmed into the mode register. The -7 part
+        allows CL2 at this clock (tCK2 min 7.5 ns, tAC2 5.4 ns, the same
+        access time as CL3), and it makes every read one clock shorter.
+        read_delay: capture offset trim. The data is captured in READ_READ,
+        cas_latency + read_delay - 1 clocks after the READ command's clock,
+        so with read_delay=1 (the proven setting at CL3) that is
+        cas_latency clocks. The phase-shifted SDRAM clock moves the data
+        window against the capture edge, 0 is the original timing.
         """
         super().__init__()
+        assert cas_latency in (2, 3)
+        self.cas_latency = cas_latency
         self.read_delay = read_delay
+        # distance from the READ command to the capture, in clocks
+        self.capture = cas_latency + read_delay - 1
+        assert self.capture >= 1
+        # extra NOP clocks between ACT and the column command (tRCD)
+        self.rcd_wait = clocks(T_RCD) - 1
+        # clocks from the WRITE command to the next ACT: tDAL, and tRC from
+        # the ACT (which is rcd_wait + 1 clocks before the WRITE); at least
+        # 2: one clock for auto precharge to start, one for tRP
+        self.write_to_act = max(
+            2, clocks(T_DAL), clocks(T_RC) - self.rcd_wait - 1
+        )
+        # clocks from a REF command to the next command (tRC)
+        self.ref_to_cmd = max(2, clocks(T_RC))
+        # time between refresh commands, minus what a running access can
+        # delay one
         self.cycles_between_refresh = (
             (CLOCK_FREQ * 1_000 * REFRESH_TIME) // REFRESH_COUNT
+            - REFRESH_MARGIN
         )
+        # the longest access must not stretch the interval over the limit
+        assert self.rcd_wait + self.capture + 4 <= REFRESH_MARGIN
 
     @property
     def ports(self):
@@ -167,6 +213,7 @@ class SDRAMController(Component):
         dqm_r = Signal(2)
         state_cnt = Signal(4, init=0xf)
         refresh_cnt = Signal(10)
+        init_refs = Signal(4, init=INIT_REFRESHES)
         command = Signal(8, init=Command.NOP)
         state = Signal(5, init=State.INIT_NOP1)
 
@@ -246,8 +293,8 @@ class SDRAMController(Component):
         with m.Else():
             m.d.sync += resp.valid.eq(0)
 
-        # Refresh counter
-        with m.If(state == State.REF_NOP2):
+        # Refresh counter: counts from one REF command to the next
+        with m.If(state == State.REF_REF):
             m.d.sync += refresh_cnt.eq(0)
         with m.Else():
             m.d.sync += refresh_cnt.eq(refresh_cnt + 1)
@@ -272,9 +319,9 @@ class SDRAMController(Component):
             ]
         with m.Elif(state == State.INIT_LOAD):
             # Program the mode register during the load cycle.
-            # A9 (burst read / single write) = 1, CAS latency = 3,
+            # A9 (burst read / single write) = 1, CAS latency in A6:A4,
             # burst length = 1
-            m.d.comb += addr_r.eq(0b1000110000)
+            m.d.comb += addr_r.eq(0b1000000000 | (self.cas_latency << 4))
 
         # Next-state logic
         m.d.comb += [
@@ -285,9 +332,11 @@ class SDRAMController(Component):
         with m.If(state == State.IDLE):
             # Monitor for refresh or hold
             with m.If(refresh_due):
+                # every access ends with auto precharge, so all banks are idle
+                # already (the access spacing includes tRP): REF right away
                 m.d.comb += [
-                    state_next.eq(State.REF_PRE),
-                    command_next.eq(Command.PALL),
+                    state_next.eq(State.REF_REF),
+                    command_next.eq(Command.REF),
                 ]
             with m.Elif(accept & ~host.we):
                 m.d.comb += [
@@ -318,76 +367,88 @@ class SDRAMController(Component):
                         command_next.eq(Command.REF),
                     ]
                 with m.Case(State.INIT_REF1):
+                    m.d.sync += init_refs.eq(init_refs - 1)
                     m.d.comb += [
                         state_next.eq(State.INIT_NOP2),
                         state_cnt_next.eq(3),
                     ]
                 with m.Case(State.INIT_NOP2):
-                    m.d.comb += [
-                        state_next.eq(State.INIT_REF2),
-                        command_next.eq(Command.REF),
-                    ]
-                with m.Case(State.INIT_REF2):
-                    m.d.comb += [
-                        state_next.eq(State.INIT_NOP3),
-                        state_cnt_next.eq(3),
-                    ]
-                with m.Case(State.INIT_NOP3):
-                    m.d.comb += [
-                        state_next.eq(State.INIT_LOAD),
-                        command_next.eq(Command.MRS),
-                    ]
+                    with m.If(init_refs == 0):
+                        m.d.comb += [
+                            state_next.eq(State.INIT_LOAD),
+                            command_next.eq(Command.MRS),
+                        ]
+                    with m.Else():
+                        m.d.comb += [
+                            state_next.eq(State.INIT_REF1),
+                            command_next.eq(Command.REF),
+                        ]
                 with m.Case(State.INIT_LOAD):
                     m.d.comb += state_next.eq(State.INIT_NOP4)
                 # INIT_NOP4: default -> IDLE
 
-                # - refresh
-                with m.Case(State.REF_PRE):
-                    m.d.comb += state_next.eq(State.REF_NOP1)
-                with m.Case(State.REF_NOP1):
-                    m.d.comb += [
-                        state_next.eq(State.REF_REF),
-                        command_next.eq(Command.REF),
-                    ]
+                # - refresh (IDLE went straight to REF_REF)
                 with m.Case(State.REF_REF):
-                    m.d.comb += [
-                        state_next.eq(State.REF_NOP2),
-                        state_cnt_next.eq(3),
-                    ]
+                    if self.ref_to_cmd > 2:
+                        m.d.comb += [
+                            state_next.eq(State.REF_NOP2),
+                            state_cnt_next.eq(self.ref_to_cmd - 3),
+                        ]
                 # REF_NOP2: default -> IDLE
 
-                # - write
+                # - write: ACT, rcd_wait NOPs, WRITE, then IDLE again
+                #   (write_to_act - 2) NOPs later
                 with m.Case(State.WRIT_ACT):
-                    m.d.comb += state_next.eq(State.WRIT_NOP1)
+                    if self.rcd_wait:
+                        m.d.comb += [
+                            state_next.eq(State.WRIT_NOP1),
+                            state_cnt_next.eq(self.rcd_wait - 1),
+                        ]
+                    else:
+                        m.d.comb += [
+                            state_next.eq(State.WRIT_CAS),
+                            command_next.eq(Command.WRIT),
+                        ]
                 with m.Case(State.WRIT_NOP1):
                     m.d.comb += [
                         state_next.eq(State.WRIT_CAS),
                         command_next.eq(Command.WRIT),
                     ]
                 with m.Case(State.WRIT_CAS):
-                    m.d.comb += state_next.eq(State.WRIT_NOP2)
+                    if self.write_to_act > 2:
+                        m.d.comb += [
+                            state_next.eq(State.WRIT_NOP2),
+                            state_cnt_next.eq(self.write_to_act - 3),
+                        ]
                 # WRIT_NOP2: default -> IDLE
 
-                # - read
+                # - read: ACT, rcd_wait NOPs, READ, capture - 1 NOPs,
+                #   READ_READ captures the data
                 with m.Case(State.READ_ACT):
-                    m.d.comb += state_next.eq(State.READ_NOP1)
+                    if self.rcd_wait:
+                        m.d.comb += [
+                            state_next.eq(State.READ_NOP1),
+                            state_cnt_next.eq(self.rcd_wait - 1),
+                        ]
+                    else:
+                        m.d.comb += [
+                            state_next.eq(State.READ_CAS),
+                            command_next.eq(Command.READ),
+                        ]
                 with m.Case(State.READ_NOP1):
                     m.d.comb += [
                         state_next.eq(State.READ_CAS),
                         command_next.eq(Command.READ),
                     ]
                 with m.Case(State.READ_CAS):
-                    m.d.comb += state_next.eq(State.READ_NOP2)
-                with m.Case(State.READ_NOP2):
-                    if self.read_delay:
-                        # READ_WAIT lasts read_delay clocks
+                    if self.capture > 1:
                         m.d.comb += [
-                            state_next.eq(State.READ_WAIT),
-                            state_cnt_next.eq(self.read_delay - 1),
+                            state_next.eq(State.READ_NOP2),
+                            state_cnt_next.eq(self.capture - 2),
                         ]
                     else:
                         m.d.comb += state_next.eq(State.READ_READ)
-                with m.Case(State.READ_WAIT):
+                with m.Case(State.READ_NOP2):
                     m.d.comb += state_next.eq(State.READ_READ)
                 # READ_READ: default -> IDLE
 
