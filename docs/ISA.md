@@ -34,10 +34,10 @@ Return stack is used only for backing up IP and PSP between `CALL` and `RET`.
 
 ### Memory Model
 
-**Stackette**'s memory is byte- and word-addressed. Stacks are word-aligned,
-but otherwise memory access is free-form. Unaligned word access results in two
-consecutive byte accesses, similar to x86 (and unlike PDP-11 or MIPS, that
-generate special exceptions).
+**Stackette**'s memory is byte-addressed. Stacks are word-aligned, but otherwise
+memory access is free-form. Unaligned word access results in two consecutive
+byte accesses, similar to x86 (and unlike PDP-11 or MIPS, that generate special
+exceptions).
 
 ### Memory Management Unit
 
@@ -46,9 +46,9 @@ MMU is tightly coupled with the other elements of **Stackette**'s architecture.
 The machine has four address spaces, up to 64 KiB each:
 - code (addressed by IP),
 - return stack (RSP),
-- parameter stack (PSP, SFP, and TOS),
+- parameter stack (PSP, PFP, and TOS),
 - data (MBP, with or without MIDX, or by absolute addresses).
- 
+
 The MMU maps 4 KiB pages to 28-bit physical addresses, with separate maps for the 
 system and the user context.
 
@@ -324,6 +324,11 @@ system context is a soft reset. Faulting instructions are restartable (nothing
 changes), except the write-back fault, which is asynchronous.
 
 ## Peripherals (byte addresses in the data space, default map)
+
+**Stackette** has no special I/O space, akin to PDP-11. All peripherals are mapped
+into data memory space.
+
+Currently, all peripherals are fit in one memory page.
 
 | Address        | Size, words | Device                                                                                                              |
 |----------------|-------------|---------------------------------------------------------------------------------------------------------------------|
