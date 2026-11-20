@@ -126,9 +126,15 @@ class CPU(Component):
     ctx_wdata: In(16)
     ctx_rdata: Out(16)
 
-    def __init__(self, *, user_ip_init=IP_INIT):
+    def __init__(self, *, user_ip_init=IP_INIT, prefetch=True):
+        """
+        prefetch: fetch the next word of code while an instruction that does
+        not use the memory executes, see the "prefetch" comment in
+        elaborate.
+        """
         super().__init__()
         self.user_ip_init = user_ip_init
+        self.prefetch = prefetch
 
     def elaborate(self, platform):
         m = Module()
@@ -711,6 +717,58 @@ class CPU(Component):
             with m.Else():
                 m.d.comb += self.space.eq(Space.DATA)
 
+        # ---- prefetch ----
+        # The instructions that never use the memory port between DECODE and
+        # the next FETCH (register and stack operands only, no extra word)
+        # leave the port idle while they execute. The word after them, which
+        # FETCH is going to read, is requested in DECODE and waits in a
+        # register (or is still on its way) when FETCH comes. Only that one
+        # word, and only when it is certain that FETCH wants it:
+        #   * the request is made by the states DECODE, EXEC, ALU_DELIVER,
+        #     LD_DELIVER, none of which drives `req` otherwise; what is not
+        #     taken by FETCH is dropped by any other state (pf_kill): an
+        #     abort, an interrupt, a mode switch never sees a prefetched word
+        #   * FETCH takes it only for the same address, and not before the
+        #     pending write-back fault and the interrupt, which come first
+        #   * a refusal of the request is ignored: FETCH asks again and gets
+        #     the refusal that counts
+        #   * the response of a request that nobody wants any more (`pf_fly`
+        #     still up) is dropped; the arbiter allows one read at a time, so
+        #     it can not be mistaken for the response of another request
+        # The memory does the rest: the word is in the read-ahead buffer
+        # (the same block as the instruction), or the read waits for the burst
+        # that is going on, while the instruction executes.
+        if self.prefetch:
+            pf_req = Signal()       # the request is up, not accepted yet
+            pf_fly = Signal()       # accepted, the response is awaited
+            pf_live = Signal()      # the next FETCH wants it
+            pf_valid = Signal()     # pf_word holds it
+            pf_addr = Signal(15)
+            pf_word = Signal(16)
+            pf_path = Signal()      # the states that leave `req` to us
+            pf_decode = Signal()
+            pf_fetch = Signal()
+            pf_simple = (
+                is_lea | ((is_ld | is_alu) & ~mem_operand) | is_unary
+                | is_shift | is_skip | is_setclr | (is_addp & ~instr[9])
+            )
+            # a skipped instruction goes from DECODE to FETCH, the others
+            # through EXEC (string instructions go back to their start)
+            pf_elig = Mux(
+                skipping,
+                ~needs_extra,
+                ok & ~needs_extra & ~str_mode & pf_simple,
+            )
+            pf_want = Signal()
+            m.d.comb += [
+                pf_want.eq(pf_decode & pf_elig),
+                req.valid.eq((pf_req | pf_want) & pf_path),
+                req.we.eq(0),
+                req.byte_hi.eq(1),
+                req.byte_lo.eq(1),
+                req.addr.eq(Mux(pf_req, pf_addr, ip[1:])),
+            ]
+
         # finally, the CPU control FSM
         with m.FSM(reset='INIT') as fsm:
             with m.State('INIT'):
@@ -736,6 +794,18 @@ class CPU(Component):
                     req.byte_lo.eq(1),
                     req.addr.eq(ip[1:]),
                 ]
+                if self.prefetch:
+                    have = pf_valid & (pf_addr == ip[1:])
+                    hot = pf_live & pf_fly & (pf_addr == ip[1:])
+                    with m.If(have | hot):
+                        # the word is there or on its way: no request
+                        m.d.comb += req.valid.eq(0)
+                    with m.If(~hot | resp.valid):
+                        m.d.sync += [
+                            pf_req.eq(0),
+                            pf_live.eq(0),
+                            pf_valid.eq(0),
+                        ]
                 with m.If(pend_wb):
                     m.d.sync += pend_wb.eq(0)
                     abort(ID_FAULT | FAULT_WB, wb_addr, first_fetch=True)
@@ -743,6 +813,16 @@ class CPU(Component):
                     # the user context carries on with the instruction that
                     # was to be fetched (or with the SKIP before it)
                     abort(ID_IRQ | self.irq_num, 0, first_fetch=True)
+                with m.Elif(have | (hot & resp.valid) if self.prefetch else C(0)):
+                    m.d.sync += [
+                        ip.eq(ip + 2),
+                        instr.eq(Mux(have, pf_word, resp.data)),
+                    ]
+                    with m.If(~skipping):
+                        m.d.sync += istart.eq(ip)
+                    m.next = 'DECODE'
+                with m.Elif(hot if self.prefetch else C(0)):
+                    pass    # the response is coming
                 with m.Elif(self.mem_fault):
                     mem_refused(first_fetch=True)
                 with m.Elif(req.ready):
@@ -1621,6 +1701,43 @@ class CPU(Component):
                 pend_wb.eq(1),
                 wb_addr.eq(Cat(C(0, 1), self.stack_mem.req.addr)),
             ]
+
+        if self.prefetch:
+            m.d.comb += [
+                pf_path.eq(
+                    fsm.ongoing('DECODE') | fsm.ongoing('EXEC')
+                    | fsm.ongoing('ALU_DELIVER') | fsm.ongoing('LD_DELIVER')
+                ),
+                pf_decode.eq(fsm.ongoing('DECODE')),
+                pf_fetch.eq(fsm.ongoing('FETCH')),
+            ]
+            pf_acc = req.valid & req.ready & pf_path
+            pf_refused = req.valid & self.mem_fault & pf_path
+            # the response
+            with m.If(pf_fly & resp.valid):
+                m.d.sync += pf_fly.eq(0)
+                with m.If(pf_live & pf_path):
+                    m.d.sync += [
+                        pf_word.eq(resp.data),
+                        pf_valid.eq(1),
+                    ]
+            # the request
+            with m.If(pf_want):
+                m.d.sync += [pf_live.eq(1), pf_addr.eq(ip[1:])]
+            with m.If(pf_acc):
+                m.d.sync += [pf_fly.eq(1), pf_req.eq(0)]
+            with m.Elif(pf_refused):
+                m.d.sync += [pf_req.eq(0), pf_live.eq(0)]
+            with m.Elif(pf_want):
+                m.d.sync += pf_req.eq(1)
+            # anything else than the instruction's own states and FETCH:
+            # nothing is kept
+            with m.If(~(pf_path | pf_fetch)):
+                m.d.sync += [pf_req.eq(0), pf_live.eq(0), pf_valid.eq(0)]
+
+        # for the profiling test (tests/test_memory_profile.py): no logic
+        self.dbg_state = fsm.state
+        self.dbg_encoding = fsm.encoding
 
         return m
 
