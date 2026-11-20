@@ -1,6 +1,6 @@
 """
 Simple controller for the ISSI IS42S16160G-7 SDRAM found on the DE0-Nano.
-16M x 16-bit data bus (32 MiB), CAS latency 3, 50 MHz controller clock by
+16M x 16-bit data bus (32 MiB), CAS latency 2, 50 MHz controller clock by
 default (set CLOCK_FREQ to match the clock you actually drive it with).
 
 Amaranth HDL port of stffrdhrn/sdram-controller (rtl/sdram_controller.v),
@@ -8,7 +8,10 @@ with the interfaces described using amaranth.lib.wiring (Amaranth >= 0.5).
 
 Host interface (`bus`, a MemoryPort, see memory_port.py) is a valid/ready
 handshake on `bus.req`:
-  * No burst support.
+  * No burst support on the host side. With burst=4 (the default) the chip
+    is read 4 words at a time, an aligned block of 8 bytes, and the words
+    are kept in `buffers` read-ahead buffers: a later read of a word that is
+    in one is answered without the SDRAM (see below).
 
   * The initiator sets valid together with we / addr / wdata and holds them
     until ready is high. The request is accepted on the clock edge where
@@ -28,11 +31,28 @@ handshake on `bus.req`:
     write, or leave the data bus floating on a read.)
 
   * we = 0 reads 16 bits from addr; the result appears on `bus.resp`
-    a few clocks later, when resp.valid pulses.
+    a few clocks later, when resp.valid pulses. On a read the byte enables
+    are ignored by the SDRAM (both lanes are read, the buffers need whole
+    words), the lane that was not enabled is still undefined for the host.
+
+Read-ahead (burst=4):
+  * A read first looks (READ_CHK, one clock, from the latched address, so
+    the MMU's late address never meets the comparison) for the word in the
+    buffers: a hit is answered 2 clocks after the accept, and the SDRAM is
+    not touched. A miss reads the aligned block of 4 words (sequential
+    burst, wrapping inside the block, the requested word first: its response
+    is as early as without burst) into the buffer that was used least
+    recently; the controller is ready again when the 4th word is in. The
+    block is inside a row and a bank (columns are the low address bits).
+  * Every write invalidates the word it writes in the buffers (all writes
+    come through here), a refresh does not matter. Reads and writes of all
+    initiators go through the same buffers, so with two of them a data read
+    does not push the code stream's block out.
 
 Timing (50 MHz, CL2, all derived from the -7 datasheet minimums, see T_*):
   * write: ACT, WRITE the next clock (tRCD 15 ns), ready again 2 clocks after
-    the WRITE: 3 clocks per write. Read: 5 clocks from accept to response.
+    the WRITE: 3 clocks per write. Read: 6 clocks from accept to response on
+    a miss (5 with burst=1, which has no READ_CHK), 2 on a hit.
   * Every access ends with auto precharge and the spacing of the next
     command includes tRP, so refresh needs no PRECHARGE: REF, one NOP, ready
     again (3 clocks), once per tREF/8192 minus a margin.
@@ -57,8 +77,8 @@ from memory_port import MemoryPort
 CLOCK_FREQ = 50         # MHz, frequency of the controller's clock
 REFRESH_TIME = 64       # ms (how often we need to refresh)
 REFRESH_COUNT = 8192    # refresh cycles required per refresh_time
-REFRESH_MARGIN = 12     # clocks: a refresh may wait for an access that is
-                        # already running (longest one is under 8 clocks)
+REFRESH_MARGIN = 16     # clocks: a refresh may wait for an access that is
+                        # already running (longest one is under 12 clocks)
 POWERUP_TIME = 200      # us of stable clock + NOPs before the first command
                         # (datasheet: 100 us)
 INIT_REFRESHES = 8      # auto refreshes during init (datasheet: at least 2)
@@ -84,6 +104,13 @@ SDRAM_ADDR_WIDTH = max(ROW_WIDTH, COL_WIDTH)
 HOST_ADDR_WIDTH = ROW_WIDTH + COL_WIDTH + BANK_WIDTH
 
 
+def fill_sel(victim, i):
+    """Is buffer i the victim (a Signal, or the constant 0 for one buffer)."""
+    if isinstance(victim, int):
+        return Const(int(victim == i), 1)
+    return victim == i
+
+
 class State(IntEnum):
     """
     State encoding (same values as the Verilog; state[4] means "read/write").
@@ -106,6 +133,7 @@ class State(IntEnum):
     READ_CAS = 0b10010
     READ_NOP2 = 0b10011
     READ_READ = 0b10100
+    READ_CHK = 0b10101
 
     WRIT_ACT = 0b11000
     WRIT_NOP1 = 0b11001
@@ -152,8 +180,11 @@ class SDRAMController(Component):
     bus: In(MemoryPort(HOST_ADDR_WIDTH))
     sdram: Out(SDRAMPins())
 
-    def __init__(self, *, read_delay=1, cas_latency=2):
+    def __init__(self, *, read_delay=1, cas_latency=2, burst=4, buffers=2):
         """
+        burst: 4 reads 4 words at a time into the read-ahead buffers, 1 is
+        the plain controller (no buffers, every read goes to the SDRAM).
+        buffers: how many 4-word blocks are kept (1 or 2).
         cas_latency: 2 or 3, programmed into the mode register. The -7 part
         allows CL2 at this clock (tCK2 min 7.5 ns, tAC2 5.4 ns, the same
         access time as CL3), and it makes every read one clock shorter.
@@ -165,6 +196,10 @@ class SDRAMController(Component):
         """
         super().__init__()
         assert cas_latency in (2, 3)
+        assert burst in (1, 4)
+        assert buffers in (1, 2)
+        self.burst = burst
+        self.buffers = buffers
         self.cas_latency = cas_latency
         self.read_delay = read_delay
         # distance from the READ command to the capture, in clocks
@@ -186,8 +221,13 @@ class SDRAMController(Component):
             (CLOCK_FREQ * 1_000 * REFRESH_TIME) // REFRESH_COUNT
             - REFRESH_MARGIN
         )
-        # the longest access must not stretch the interval over the limit
-        assert self.rcd_wait + self.capture + 4 <= REFRESH_MARGIN
+        # the longest access (accept to ready again: the check, ACT, the
+        # NOPs, READ, the NOPs, the burst) must not stretch the interval
+        # over the limit
+        self.read_clocks = (
+            (burst > 1) + 1 + self.rcd_wait + 1 + (self.capture - 1) + burst
+        )
+        assert self.read_clocks + 4 <= REFRESH_MARGIN
 
     @property
     def ports(self):
@@ -225,6 +265,20 @@ class SDRAMController(Component):
 
         bank_addr_r = Signal(bank_width)
         addr_r = Signal(SDRAM_ADDR_WIDTH)
+
+        # the read-ahead buffers: block address, a valid bit per word, the
+        # 4 words; `lru` the one used least recently, `fill` the one the
+        # burst in progress goes to
+        blk = haddr_r[2:]
+        off = haddr_r[:2]
+        btag = [
+            Signal(HOST_ADDR_WIDTH - 2, name=f'btag{i}')
+            for i in range(self.buffers)
+        ]
+        bvalid = [Signal(4, name=f'bvalid{i}') for i in range(self.buffers)]
+        bdata = [Signal(64, name=f'bdata{i}') for i in range(self.buffers)]
+        lru = Signal()
+        fill = Signal()
 
         # Request handshake: only take requests in IDLE, and not when a
         # refresh is about to start (the refresh has priority in IDLE).
@@ -283,15 +337,67 @@ class SDRAMController(Component):
                 wr_data_r.eq(host.wdata),
                 dqm_r.eq(Cat([~host.byte_lo, ~host.byte_hi])),
             ]
+            if self.burst > 1:
+                # a read takes both lanes, the buffers keep whole words
+                with m.If(~host.we):
+                    m.d.sync += dqm_r.eq(0)
 
-        # Read response
-        with m.If(state == State.READ_READ):
+        # Read response: the first word of the burst as it comes (the one
+        # that was asked for), or a hit in the buffers
+        m.d.sync += resp.valid.eq(0)
+        with m.If((state == State.READ_READ) & (state_cnt == self.burst - 1)):
             m.d.sync += [
                 resp.data.eq(sdram.dq_i),
                 resp.valid.eq(1),
             ]
-        with m.Else():
-            m.d.sync += resp.valid.eq(0)
+
+        if self.burst > 1:
+            hits = [
+                (btag[i] == blk) & bvalid[i].bit_select(off, 1)
+                for i in range(self.buffers)
+            ]
+            hit_any = Signal()
+            hit_data = Signal(16)
+            if self.buffers == 2:
+                m.d.comb += [
+                    hit_any.eq(hits[0] | hits[1]),
+                    hit_data.eq(Mux(
+                        hits[0],
+                        bdata[0].word_select(off, 16),
+                        bdata[1].word_select(off, 16),
+                    )),
+                ]
+            else:
+                m.d.comb += [
+                    hit_any.eq(hits[0]),
+                    hit_data.eq(bdata[0].word_select(off, 16)),
+                ]
+            with m.If((state == State.READ_CHK) & hit_any):
+                m.d.sync += [
+                    resp.data.eq(hit_data),
+                    resp.valid.eq(1),
+                ]
+                if self.buffers == 2:
+                    m.d.sync += lru.eq(hits[0])
+
+            # The burst's words: the first is the requested one, they wrap
+            # inside the block. The word is valid from the clock after.
+            idx = Signal(2)
+            m.d.comb += idx.eq(off + ~state_cnt[:2])
+            with m.If(state == State.READ_READ):
+                for i in range(self.buffers):
+                    with m.If(fill == i):
+                        m.d.sync += [
+                            bdata[i].word_select(idx, 16).eq(sdram.dq_i),
+                            bvalid[i].bit_select(idx, 1).eq(1),
+                        ]
+
+            # A write takes its word out of the buffers (the check is in
+            # the ACT clock, the next access is later than that)
+            with m.If(state == State.WRIT_ACT):
+                for i in range(self.buffers):
+                    with m.If(btag[i] == blk):
+                        m.d.sync += bvalid[i].bit_select(off, 1).eq(0)
 
         # Refresh counter: counts from one REF command to the next
         with m.If(state == State.REF_REF):
@@ -320,8 +426,11 @@ class SDRAMController(Component):
         with m.Elif(state == State.INIT_LOAD):
             # Program the mode register during the load cycle.
             # A9 (burst read / single write) = 1, CAS latency in A6:A4,
-            # burst length = 1
-            m.d.comb += addr_r.eq(0b1000000000 | (self.cas_latency << 4))
+            # sequential bursts, burst length A2:A0 = 1 or 4 (0b010)
+            m.d.comb += addr_r.eq(
+                0b1000000000 | (self.cas_latency << 4)
+                | (0b010 if self.burst == 4 else 0)
+            )
 
         # Next-state logic
         m.d.comb += [
@@ -339,10 +448,14 @@ class SDRAMController(Component):
                     command_next.eq(Command.REF),
                 ]
             with m.Elif(accept & ~host.we):
-                m.d.comb += [
-                    state_next.eq(State.READ_ACT),
-                    command_next.eq(Command.BACT),
-                ]
+                if self.burst > 1:
+                    # look in the buffers first, from the latched address
+                    m.d.comb += state_next.eq(State.READ_CHK)
+                else:
+                    m.d.comb += [
+                        state_next.eq(State.READ_ACT),
+                        command_next.eq(Command.BACT),
+                    ]
             with m.Elif(accept & host.we):
                 m.d.comb += [
                     state_next.eq(State.WRIT_ACT),
@@ -447,10 +560,38 @@ class SDRAMController(Component):
                             state_cnt_next.eq(self.capture - 2),
                         ]
                     else:
-                        m.d.comb += state_next.eq(State.READ_READ)
+                        m.d.comb += [
+                            state_next.eq(State.READ_READ),
+                            state_cnt_next.eq(self.burst - 1),
+                        ]
                 with m.Case(State.READ_NOP2):
-                    m.d.comb += state_next.eq(State.READ_READ)
-                # READ_READ: default -> IDLE
+                    m.d.comb += [
+                        state_next.eq(State.READ_READ),
+                        state_cnt_next.eq(self.burst - 1),
+                    ]
+                # READ_READ: the burst's `burst` clocks (state_cnt counts
+                # them down), then the default -> IDLE
+
+                # the check of a read: a hit is answered above and we are
+                # done, a miss takes the least recently used buffer and goes
+                # on to the SDRAM
+                if self.burst > 1:
+                    with m.Case(State.READ_CHK):
+                        with m.If(~hit_any):
+                            m.d.comb += [
+                                state_next.eq(State.READ_ACT),
+                                command_next.eq(Command.BACT),
+                            ]
+                            victim = lru if self.buffers == 2 else 0
+                            m.d.sync += fill.eq(victim)
+                            for i in range(self.buffers):
+                                with m.If(fill_sel(victim, i)):
+                                    m.d.sync += [
+                                        btag[i].eq(blk),
+                                        bvalid[i].eq(0),
+                                    ]
+                            if self.buffers == 2:
+                                m.d.sync += lru.eq(~lru)
 
                 with m.Default():
                     m.d.comb += state_next.eq(State.IDLE)

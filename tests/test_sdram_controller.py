@@ -12,6 +12,8 @@ The chip model decodes the commands on the pins every clock and fails on:
     MRS with the expected CAS latency), ACT within tMRD of the MRS,
   * two REF commands further apart than tREF / 8192 once running,
   * the controller driving DQ while the chip drives read data.
+The reads are bursts of 4 (sequential, wrapping inside the aligned block) as
+the controller programs them; the model returns all 4 words of the block.
 
 Read data is put on dq_i so that the controller's own capture clock sees it:
 the proven relationship on the board is that the data of a read is on the
@@ -51,8 +53,9 @@ IDLE, ACTIVE = 'idle', 'active'
 
 
 class Chip:
-    def __init__(self, cas_latency, read_delay):
+    def __init__(self, cas_latency, read_delay, burst):
         self.cl = cas_latency
+        self.burst = burst
         self.capture = cas_latency + read_delay - 1
         self.mem = {}
         self.banks = [dict(row=None, t_act=-10**9, ready=0) for _ in range(4)]
@@ -96,7 +99,7 @@ class Chip:
                 assert self.n_ref >= sc.INIT_REFRESHES, \
                     f'{where}: MRS after only {self.n_ref} REF'
                 assert now >= self.last_ref + T_RC, f'{where}: MRS before tRC'
-                want = 0x200 | (self.cl << 4)
+                want = 0x200 | (self.cl << 4) | (0b010 if self.burst == 4 else 0)
                 assert p['a'] == want, \
                     f'{where}: mode register {p["a"]:#x}, expected {want:#x}'
                 self.mrs_done = True
@@ -147,11 +150,18 @@ class Chip:
                 ready = max(now + T_DAL, b['t_act'] + T_RAS + T_RP)
                 self.n_cmds['WRITE'] += 1
             else:
-                data_at = n + self.capture
-                self.read_data[data_at] = self.mem.get(key, 0xdead)
-                self.bus_busy.update((data_at - 1, data_at, data_at + 1))
-                # precharge starts cl - 1 clocks before the last data
-                ready = max(now + CLK_NS + T_RP, b['t_act'] + T_RAS + T_RP)
+                col = p['a'] & 0x1ff
+                for j in range(self.burst):
+                    # sequential burst: wraps inside the aligned block
+                    c = (col & ~(self.burst - 1)) | ((col + j) & (self.burst - 1))
+                    data_at = n + self.capture + j
+                    self.read_data[data_at] = self.mem.get(
+                        (p['ba'], b['row'], c), 0xdead)
+                    self.bus_busy.update((data_at - 1, data_at, data_at + 1))
+                # auto precharge starts cl - 1 clocks before the last data,
+                # that is `burst` clocks after the READ
+                ready = max(
+                    now + self.burst * CLK_NS, b['t_act'] + T_RAS) + T_RP
                 self.n_cmds['READ'] += 1
             b['row'] = None
             b['ready'] = ready
@@ -159,15 +169,18 @@ class Chip:
             raise AssertionError(f'{where}: unexpected command {code}')
 
 
-def run_case(seed, n_ops, cas_latency=2, read_delay=1, p_gap=0.3):
+def run_case(seed, n_ops, cas_latency=2, read_delay=1, p_gap=0.3, burst=4,
+             buffers=2, cols=8, seq=0.0, p_write=0.5):
     rng = random.Random(seed)
-    dut = SDRAMController(cas_latency=cas_latency, read_delay=read_delay)
-    chip = Chip(cas_latency, read_delay)
+    dut = SDRAMController(
+        cas_latency=cas_latency, read_delay=read_delay, burst=burst,
+        buffers=buffers)
+    chip = Chip(cas_latency, read_delay, burst)
     req, resp, pins = dut.bus.req, dut.bus.resp, dut.sdram
     ref = {}                    # host word address -> value
     pending = {'n': 0}          # reads accepted, response not yet seen
     expected = []               # (address, byte enables, value) per read
-    results = {'done': False, 'latencies': set()}
+    results = {'done': False, 'latencies': set(), 'host_reads': 0}
 
     sim = Simulator(dut)
     sim.add_clock(1e-6)
@@ -188,6 +201,7 @@ def run_case(seed, n_ops, cas_latency=2, read_delay=1, p_gap=0.3):
                 a=a, ba=ba, dqm=dqm, dq_o=dq_o, dq_oe=dq_oe))
             if valid and ready and not we:
                 accepted.append(n)
+                results['host_reads'] += 1
             if rvalid:
                 at = accepted.pop(0)
                 addr, hi, lo, want = expected.pop(0)
@@ -203,18 +217,25 @@ def run_case(seed, n_ops, cas_latency=2, read_delay=1, p_gap=0.3):
 
     sim.add_testbench(chip_proc, background=True)
 
+    last = [0]
+
     def host_addr():
-        # a few banks/rows/columns so bank changes and row changes happen
+        # a few banks/rows/columns so bank changes and row changes happen;
+        # with `seq` the next word of the previous access, like code
+        if rng.random() < seq:
+            last[0] = (last[0] & ~0x1ff) | ((last[0] + 1) & (cols - 1))
+            return last[0]
         bank = rng.randrange(4)
         row = rng.randrange(3)
-        col = rng.randrange(8)
-        return (bank << 22) | (row << 9) | col
+        col = rng.randrange(cols)
+        last[0] = (bank << 22) | (row << 9) | col
+        return last[0]
 
     async def host(ctx):
         # one read at a time, like the arbiter lets through
         for i in range(n_ops):
             addr = host_addr()
-            we = rng.random() < 0.5
+            we = rng.random() < p_write
             hi, lo = rng.choice([(1, 1)] * 6 + [(1, 0), (0, 1)])
             data = rng.randrange(65536)
             for gap in range(rng.randrange(1, 4) if rng.random() < p_gap else 0):
@@ -269,15 +290,25 @@ def check_case(seed, n_ops, **kw):
 
 
 def test_sdram_controller():
-    # default: CL2, the proven capture relationship
+    # default: CL2, bursts of 4 and two read-ahead buffers, a few words per
+    # row so that hits, misses and writes into buffered blocks all happen
     check_case(1, 4000)
     check_case(2, 4000, p_gap=0.0)          # back to back
-    # CL3 as before still works
-    check_case(3, 2000, cas_latency=3)
-    # the read latency of the default configuration, accept to response:
-    # ACT, READ (tRCD = 1 clock), cl clocks to the capture, the response
-    chip, results = run_case(4, 500, p_gap=0.0)
-    assert min(results['latencies']) == 5, results['latencies']
+    # runs of sequential reads, like code, with some writes in between
+    check_case(3, 4000, seq=0.8, cols=64, p_write=0.1)
+    check_case(4, 4000, seq=0.8, cols=64, p_write=0.1, p_gap=0.0)
+    # one buffer, CL3 and the plain controller (burst 1) work as well
+    check_case(5, 3000, buffers=1)
+    check_case(6, 2000, cas_latency=3)
+    chip, results = check_case(7, 2000, burst=1)
+    assert results['latencies'] == {5}, results['latencies']
+    # the latency of a read, accept to response: a miss is the check, ACT,
+    # READ (tRCD = 1 clock), cl clocks to the capture, the response; a hit
+    # is the check and the response. Hits do not reach the SDRAM.
+    chip, results = check_case(8, 3000, seq=0.9, cols=64, p_write=0.05)
+    assert results['latencies'] == {2, 6}, results['latencies']
+    assert chip.n_cmds['READ'] < 0.6 * results['host_reads'], \
+        (chip.n_cmds['READ'], results['host_reads'])
 
 
 if __name__ == '__main__':
