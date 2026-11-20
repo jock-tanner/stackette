@@ -747,6 +747,7 @@ class CPU(Component):
             pf_word = Signal(16)
             pf_path = Signal()      # the states that leave `req` to us
             pf_decode = Signal()
+            pf_exec = Signal()
             pf_fetch = Signal()
             pf_simple = (
                 is_lea | ((is_ld | is_alu) & ~mem_operand) | is_unary
@@ -759,9 +760,13 @@ class CPU(Component):
                 ~needs_extra,
                 ok & ~needs_extra & ~str_mode & pf_simple,
             )
+            # with an extra word (imm16 only, the other operands with one
+            # use the memory) the request is made in EXEC, when IP is past
+            # the extra word already
+            pf_elig_x = needs_extra & (is_ld | is_alu) & ~mem_operand
             pf_want = Signal()
             m.d.comb += [
-                pf_want.eq(pf_decode & pf_elig),
+                pf_want.eq((pf_decode & pf_elig) | (pf_exec & pf_elig_x)),
                 req.valid.eq((pf_req | pf_want) & pf_path),
                 req.we.eq(0),
                 req.byte_hi.eq(1),
@@ -1709,6 +1714,7 @@ class CPU(Component):
                     | fsm.ongoing('ALU_DELIVER') | fsm.ongoing('LD_DELIVER')
                 ),
                 pf_decode.eq(fsm.ongoing('DECODE')),
+                pf_exec.eq(fsm.ongoing('EXEC')),
                 pf_fetch.eq(fsm.ongoing('FETCH')),
             ]
             pf_acc = req.valid & req.ready & pf_path

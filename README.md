@@ -12,7 +12,7 @@ supported with real-time microkernel OSes in mind. Read more:
 This Repository contains a design for SoC with a CPU, obligatory MMU,
 and a minimal set of peripheral devices: serial port, timer, SDRAM controller,
 and an SPI Flash controller. All currently implemented features takes up to
-11000 LUTs.
+11500 LUTs.
 
 The SoC is implemented for the
 [Terasic DE0-Nano](https://www.terasic.com.tw/cgi-bin/page/archive.pl?No=593)
